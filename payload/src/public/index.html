@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GitRePosted Control</title>
+  <link rel="icon" type="image/png" href="/assets/reposted-logo.png">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <link rel="stylesheet" href="/app.css?v=20260730a">
+</head>
+<body class="auth-loading">
+  <div class="login-screen" id="loginScreen">
+    <div class="login-shell">
+      <form class="login-card" id="loginForm">
+        <div class="login-card-mark"><img src="/assets/reposted-logo.png" alt="GitRePosted"></div>
+        <div class="login-card-title">
+          <h1>GitRePosted</h1>
+        </div>
+        <div class="login-input-wrap"><i class="fa-solid fa-user"></i><input id="loginUsername" name="username" type="text" autocomplete="username" aria-label="Имя администратора" value="admin" required autofocus></div>
+        <div class="login-input-wrap"><i class="fa-solid fa-lock"></i><input id="loginPassword" name="password" type="password" autocomplete="current-password" aria-label="Пароль" required></div>
+        <div class="login-captcha" id="hcaptchaContainer"><div id="hcaptchaWidget" data-theme="dark"></div></div>
+        <button class="primary login-submit" type="submit"><span>Войти в панель</span><i class="fa-solid fa-arrow-right"></i></button>
+        <button class="passkey-login hidden" id="loginPasskeyButton" type="button"><span><i class="fa-solid fa-key"></i> Войти по ключу доступа</span><i class="fa-solid fa-chevron-right"></i></button>
+        <p class="login-error" id="loginError"></p>
+      </form>
+    </div>
+  </div>
+  <div class="admin-toast" id="adminToast" role="status" aria-live="polite">
+    <span class="admin-toast-icon"><i class="fa-solid fa-check"></i></span>
+    <span id="adminToastText"></span>
+    <button id="adminToastClose" type="button" aria-label="Закрыть"><i class="fa-solid fa-xmark"></i></button>
+  </div>
+  <div class="layout">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-head">
+        <div class="brand-mark">
+          <img src="/assets/reposted-logo.png" alt="GitRePosted">
+        </div>
+        <div class="brand-copy">
+          <h1>GitRePosted</h1>
+          <p>Управление ботами и пересылками</p>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <section class="sidebar-section">
+          <button class="sidebar-section-title" type="button"><span>Настройки ботов</span></button>
+          <div class="sidebar-section-links">
+            <button class="nav-link" data-section-link="config" data-bot-link="telegram"><img src="/assets/telegram.png" alt=""><span>Telegram-бот</span></button>
+            <button class="nav-link" data-section-link="config" data-bot-link="max"><img src="/assets/max.png" alt=""><span>МАКС-бот</span></button>
+          </div>
+        </section>
+
+        <section class="sidebar-section">
+          <button class="sidebar-section-title" type="button"><span>Управление</span></button>
+          <div class="sidebar-section-links">
+            <button class="nav-link active" data-section-link="users"><i class="fa-solid fa-users"></i><span>Пользователи</span></button>
+          </div>
+        </section>
+
+        <section class="sidebar-section">
+          <button class="sidebar-section-title" type="button">
+            <span>Система</span>
+          </button>
+          <div class="sidebar-section-links">
+            <button class="nav-link" data-section-link="database"><i class="fa-solid fa-database"></i><span>База данных</span></button>
+            <button class="nav-link" data-section-link="security"><i class="fa-solid fa-shield-halved"></i><span>Безопасность</span></button>
+          </div>
+        </section>
+      </nav>
+      <div class="sidebar-foot">
+        <button class="logout-button" id="logoutButton" type="button">
+          <i class="fa-solid fa-right-from-bracket"></i>
+          <span>Выйти</span>
+        </button>
+      </div>
+    </aside>
+
+    <div class="overlay" id="overlay"></div>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="menu-toggle" id="sidebarToggle" type="button"><i class="fa-solid fa-bars"></i></button>
+          <div class="page-heading">
+            <div class="page-icon"><i class="fa-solid fa-folder-open"></i></div>
+            <div>
+              <h2 id="pageTitle">Пользователи</h2>
+              <p id="pageSubtitle">Связанные аккаунты и управление доступом</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="topbar-actions"></div>
+      </header>
+
+      <div class="content">
+        <section class="stats-grid" id="statsGrid">
+          <article class="metric-card">
+            <span class="metric-label">Активный бот</span>
+            <strong id="metricBot">Telegram</strong>
+            <small>Режим управления</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Каналы</span>
+            <strong id="metricChannels">0</strong>
+            <small>Для выбранного бота</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Пересылки</span>
+            <strong id="metricBridges">0</strong>
+            <small>Показано в списке</small>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Страница</span>
+            <strong id="metricPage">1 / 1</strong>
+            <small>Пагинация списка</small>
+          </article>
+        </section>
+
+        <section class="panel-grid" data-section="dashboard">
+          <article class="panel span-12 dashboard-shell">
+            <div class="panel-bar">
+              <div>
+                <h3>Состояние системы</h3>
+                <p>Текущий статус выбранного бота.</p>
+              </div>
+            </div>
+            <div class="status-panel" id="statusBox">Загрузка данных...</div>
+          </article>
+        </section>
+
+        <section class="panel-grid hidden" data-section="bridges">
+          <article id="bridgesBrowser" class="panel span-12">
+            <div class="panel-bar">
+              <div>
+                <h3>Пересылки</h3>
+              </div>
+              <div class="panel-actions">
+                <button id="resetFormTop" type="button" class="ghost icon-button" title="Новая пересылка">
+                  <i class="fa-solid fa-plus"></i>
+                </button>
+                <span id="selectedBridgeActions" class="selected-actions hidden">
+                  <button id="editSelectedBridge" type="button" class="ghost icon-button" title="Изменить"><i class="fa-solid fa-pen"></i></button>
+                  <button id="toggleSelectedBridge" type="button" class="ghost icon-button" title="Включить или выключить"><i class="fa-solid fa-bell-slash"></i></button>
+                  <button id="deleteSelectedBridge" type="button" class="danger icon-button" title="Удалить"><i class="fa-solid fa-trash"></i></button>
+                </span>
+              </div>
+            </div>
+            <div id="bridgesList" class="list-stack"></div>
+            <div class="pager">
+              <button id="prevPage" type="button" class="pager-button"><i class="fa-solid fa-chevron-left"></i><span>Пред.</span></button>
+              <div id="pageLabel" class="pager-current">1 из 1</div>
+              <button id="nextPage" type="button" class="pager-button"><span>След.</span><i class="fa-solid fa-chevron-right"></i></button>
+            </div>
+          </article>
+
+          <article id="bridgeEditor" class="panel span-12 editor-panel hidden">
+            <div class="panel-bar">
+              <div>
+                <h3 id="bridgeEditorTitle">Новая пересылка</h3>
+                <p>Настройка автоматической пересылки публикаций между Telegram и МАКС.</p>
+              </div>
+              <div class="panel-actions editor-actions">
+                <button id="saveBridgeTop" type="button" class="success icon-button" title="Сохранить"><i class="fa-solid fa-floppy-disk"></i></button>
+                <button id="deleteBridgeTop" type="button" class="danger icon-button hidden" title="Удалить"><i class="fa-solid fa-trash"></i></button>
+                <button id="closeBridgeEditor" type="button" class="ghost icon-button" title="Назад к списку"><i class="fa-solid fa-chevron-up"></i></button>
+              </div>
+            </div>
+            <form id="bridgeForm" class="form-grid">
+              <input id="bridgeId" type="hidden">
+              <label class="span-2">
+                <span>Откуда берём</span>
+                <select id="sourceChannel"></select>
+              </label>
+              <label class="span-2">
+                <span>Куда отправляем</span>
+                <select id="targetChannels" multiple size="10"></select>
+                <small>Можно выбрать несколько каналов, удерживая Ctrl на компьютере.</small>
+              </label>
+              <label class="switch-row">
+                <input id="enabled" type="checkbox" checked>
+                <span>Пересылка включена</span>
+              </label>
+            </form>
+          </article>
+        </section>
+
+        <section class="panel-grid hidden" data-section="channels">
+          <article id="channelsBrowser" class="panel span-12">
+            <div class="panel-bar">
+              <div>
+                <h3 id="channelsPanelTitle">Каналы Telegram</h3>
+              </div>
+            </div>
+            <div id="channelsList" class="list-stack"></div>
+            <div class="pager">
+              <button id="prevChannelsPage" type="button" class="pager-button"><i class="fa-solid fa-chevron-left"></i><span>Пред.</span></button>
+              <div id="channelsPageLabel" class="pager-current">1 из 1</div>
+              <button id="nextChannelsPage" type="button" class="pager-button"><span>След.</span><i class="fa-solid fa-chevron-right"></i></button>
+            </div>
+          </article>
+        </section>
+
+        <section class="panel-grid hidden" data-section="admins">
+          <article id="adminsBrowser" class="panel span-12 admin-browser">
+            <div class="panel-bar">
+              <div>
+                <h3>Поиск и список админов</h3>
+                <p>Поиск по идентификатору, имени пользователя или имени для выбранного бота.</p>
+              </div>
+              <div class="panel-actions">
+                <button id="adminSearchButton" type="button" class="ghost icon-button" title="Найти"><i class="fa-solid fa-magnifying-glass"></i></button>
+                <button id="newAdminButton" type="button" class="ghost icon-button" title="Добавить администратора"><i class="fa-solid fa-plus"></i></button>
+              </div>
+            </div>
+            <div class="form-grid">
+              <label>
+                <span>Поиск</span>
+                <input id="adminSearchQuery" type="text" placeholder="ID или username">
+              </label>
+            </div>
+            <div id="adminUsersList" class="list-stack compact"></div>
+            <div class="pager">
+              <button id="prevAdminsPage" type="button" class="pager-button"><i class="fa-solid fa-chevron-left"></i><span>Пред.</span></button>
+              <div id="adminsPageLabel" class="pager-current">1 из 1</div>
+              <button id="nextAdminsPage" type="button" class="pager-button"><span>След.</span><i class="fa-solid fa-chevron-right"></i></button>
+            </div>
+          </article>
+
+          <article id="adminEditor" class="panel span-12 admin-editor hidden">
+            <div class="panel-bar">
+              <div>
+                <h3 id="adminEditorTitle">Новый администратор</h3>
+                <p>Назначение владельца, админа и прав для выбранного бота.</p>
+              </div>
+              <div class="panel-actions editor-actions">
+                <button id="saveAdminTop" type="button" class="success icon-button" title="Сохранить"><i class="fa-solid fa-floppy-disk"></i></button>
+                <button id="deleteAdminTop" type="button" class="danger icon-button hidden" title="Снять права"><i class="fa-solid fa-user-minus"></i></button>
+                <button id="closeAdminEditor" type="button" class="ghost icon-button" title="Назад к списку"><i class="fa-solid fa-chevron-up"></i></button>
+              </div>
+            </div>
+            <form id="adminAccessForm" class="form-grid">
+              <input id="adminUserId" type="hidden">
+              <label>
+                <span>Идентификатор пользователя</span>
+                <input id="adminUserIdView" type="text" placeholder="ID пользователя">
+              </label>
+              <label>
+                <span>Имя пользователя</span>
+                <input id="adminUsername" type="text" placeholder="@username">
+              </label>
+              <label>
+                <span>Имя</span>
+                <input id="adminFirstName" type="text" placeholder="Имя">
+              </label>
+              <label id="adminChatIdWrap">
+                <span>Идентификатор чата МАКС</span>
+                <input id="adminChatId" type="text" placeholder="Для МАКС при необходимости">
+              </label>
+              <div class="permissions-box">
+                <div class="permissions-title">Права</div>
+                <div id="permissionsBox" class="permissions-grid"></div>
+              </div>
+            </form>
+          </article>
+        </section>
+
+        <section class="panel-grid hidden" data-section="users">
+          <article class="panel span-12 settings-panel users-panel">
+            <div class="panel-bar"><div><h3>Пользователи</h3><p>Связанные аккаунты, блокировки, каналы и связи.</p></div></div>
+            <div id="accountsList" class="list-stack"></div>
+          </article>
+        </section>
+
+        <section class="panel-grid hidden" data-section="config">
+          <article class="panel span-12 settings-panel config-panel">
+            <div class="panel-bar">
+              <div>
+                <h3>Настройки бота</h3>
+                <p id="configPanelSubtitle">Настройка выбранного бота и основных параметров сервиса.</p>
+              </div>
+              <div class="panel-actions">
+                <button type="submit" form="configForm" class="success icon-button" title="Сохранить"><i class="fa-solid fa-floppy-disk"></i></button>
+              </div>
+            </div>
+            <form id="configForm" class="form-grid form-grid-wide">
+              <div class="subpanel" id="telegramConfigCard">
+                <h4>Telegram бот</h4>
+                <label class="switch-row"><span>Включить Telegram-бота</span><input id="cfgTelegramEnabled" type="checkbox"></label>
+                <label><span>Токен Telegram</span><input id="cfgTelegramToken" type="text" placeholder="Новый токен Telegram"></label>
+                <label><span>Секретный ключ уведомлений Telegram</span><input id="cfgTelegramSecret" type="text" placeholder="Новый секретный ключ Telegram"></label>
+                <label><span>Ссылка на Telegram-бота</span><input id="cfgTelegramBotUrl" type="url" placeholder="https://t.me/имя_бота"></label>
+                <label class="switch-row"><span>Публичный доступ через Telegram-бота</span><input id="cfgTelegramPublic" type="checkbox"></label>
+              </div>
+
+              <div class="subpanel" id="maxConfigCard">
+                <h4>МАКС бот</h4>
+                <label class="switch-row"><span>Включить МАКС-бота</span><input id="cfgMaxEnabled" type="checkbox"></label>
+                <label><span>Токен МАКС</span><input id="cfgMaxToken" type="text" placeholder="Новый токен МАКС"></label>
+                <label><span>Секретный ключ уведомлений МАКС</span><input id="cfgMaxSecret" type="text" placeholder="Новый секретный ключ МАКС"></label>
+                <label><span>Ссылка на МАКС-бота</span><input id="cfgMaxBotUrl" type="url" placeholder="https://max.ru/имя_бота"></label>
+                <label class="switch-row"><span>Публичный доступ через МАКС-бота</span><input id="cfgMaxPublic" type="checkbox"></label>
+                <label><span>Адрес API МАКС</span><input id="cfgMaxApiBaseUrl" type="text" placeholder="https://platform-api2.max.ru"></label>
+              </div>
+
+            </form>
+            <div class="config-service-block">
+              <div id="cfgRestartNotice" class="service-action-row hidden">
+                <div><strong>Есть неприменённые настройки</strong><p>Перезапустите службу, войдите снова и нажмите «Подключить webhook» для добавленного бота.</p></div>
+                <button id="applyConfigRestart" type="button" class="primary">Применить и перезапустить</button>
+              </div>
+              <h4>Подключение и обслуживание</h4>
+              <div class="service-action-row service-state-row">
+                <div>
+                  <strong>Служба GitRePosted</strong>
+                  <p id="serviceStatusText">Проверка состояния службы...</p>
+                </div>
+                <span id="serviceStatusBadge" class="service-status-badge"><i class="fa-solid fa-circle-notch fa-spin"></i></span>
+              </div>
+              <div class="service-action-row">
+                <div><strong>Перезапуск GitRePosted</strong><p>Применяет сохранённые токены, параметры базы и другие настройки. На несколько секунд остановит оба бота.</p></div>
+                <button id="restartService" type="button" class="ghost icon-button" title="Перезапустить службу GitRePosted"><i class="fa-solid fa-power-off"></i></button>
+              </div>
+              <div class="service-action-row" data-service-bot="telegram">
+                <div><strong>Webhook Telegram</strong><p>Нажимайте после замены токена, изменения домена или если бот перестал получать команды и публикации.</p></div>
+                <button id="setupTelegramWebhook" type="button" class="icon-button" title="Подключить webhook Telegram"><i class="fa-solid fa-link"></i></button>
+              </div>
+              <div class="service-action-row" data-service-bot="telegram">
+                <div><strong>Синхронизация каналов Telegram</strong><p>Нажимайте, если канал переименовали, он пропал из списка либо в пересылке отображается неправильный ID.</p></div>
+                <button id="reconcileTelegram" type="button" class="ghost icon-button" title="Синхронизировать каналы Telegram"><i class="fa-solid fa-arrows-rotate"></i></button>
+              </div>
+              <div class="service-action-row hidden" data-service-bot="max">
+                <div><strong>Webhook МАКС</strong><p>Нажимайте после замены токена, изменения домена или если бот перестал получать команды и публикации.</p></div>
+                <button id="setupMaxWebhook" type="button" class="icon-button" title="Подключить webhook МАКС"><i class="fa-solid fa-link"></i></button>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <section class="panel-grid hidden" data-section="database">
+          <article class="panel span-12 settings-panel">
+            <div class="panel-bar">
+              <div><h3>База данных</h3></div>
+              <div class="panel-actions">
+                <button type="submit" form="databaseForm" title="Сохранить"><i class="fa-solid fa-floppy-disk"></i></button>
+              </div>
+            </div>
+            <form id="databaseForm" class="form-grid form-grid-wide settings-content server-form">
+              <label><span>Адрес сервера базы данных</span><input id="serverDbHost" type="text" autocomplete="off"></label>
+              <label><span>Порт базы данных</span><input id="serverDbPort" type="text" inputmode="numeric" autocomplete="off"></label>
+              <label><span>Название базы данных</span><input id="serverDbName" type="text" autocomplete="off"></label>
+              <label><span>Пользователь базы данных</span><input id="serverDbUser" type="text" autocomplete="off"></label>
+              <label class="span-2"><span>Пароль базы данных</span><input id="serverDbPassword" type="password" autocomplete="new-password"></label>
+            </form>
+          </article>
+        </section>
+
+        <section class="panel-grid hidden" data-section="security">
+          <article class="panel span-12 settings-panel">
+            <div class="panel-bar">
+              <div><h3>Пароль веб-админки</h3></div>
+              <div class="panel-actions"><button type="submit" form="securityForm" title="Сохранить"><i class="fa-solid fa-floppy-disk"></i></button></div>
+            </div>
+            <form id="securityForm" class="form-grid settings-content server-form">
+              <label><span>Текущий пароль</span><input id="currentAdminPassword" type="password" autocomplete="current-password"></label>
+              <label><span>Новый пароль</span><input id="newAdminPassword" type="password" autocomplete="new-password" minlength="12"></label>
+              <label><span>Подтверждение нового пароля</span><input id="confirmAdminPassword" type="password" autocomplete="new-password" minlength="12"></label>
+            </form>
+          </article>
+          <article class="panel span-12 settings-panel">
+            <div class="panel-bar">
+              <div>
+                <h3>Ключи доступа</h3>
+                <small>Windows Hello, Face ID, отпечаток или аппаратный ключ. Можно добавить до трёх.</small>
+              </div>
+              <div class="panel-actions">
+                <button id="addPasskeyButton" type="button" title="Добавить ключ доступа"><i class="fa-solid fa-plus"></i></button>
+              </div>
+            </div>
+            <div class="passkey-list settings-content" id="passkeyList"></div>
+          </article>
+        </section>
+
+      </div>
+    </main>
+  </div>
+  <script src="/app.js?v=20260730f" type="module"></script>
+</body>
+</html>

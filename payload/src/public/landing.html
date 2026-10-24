@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="GitRePosted автоматически пересылает публикации между каналами Telegram и МАКС.">
+  <title>GitRePosted — автоматические пересылки между каналами</title>
+  <link rel="icon" type="image/png" href="/assets/reposted-logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/landing.css?v=20260720k">
+  <link rel="stylesheet" href="/landing-strict.css?v=20260720b">
+</head>
+<body>
+  <header class="header">
+    <div class="header-inner">
+      <a class="logo" href="#top"><img src="/assets/reposted-logo.png" alt=""><span>GitRePosted</span></a>
+      <nav><a href="#about">Возможности</a><a href="#start">Подключение</a><a href="#faq">Вопросы</a></nav>
+      <a class="header-link" data-platform-link="telegram" aria-disabled="true" target="_blank" rel="noopener">Открыть бота</a>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero shell">
+      <div class="hero-copy">
+        <div class="kicker"><i></i> Telegram и МАКС работают вместе</div>
+        <h1>Один пост.<br><span>Все ваши каналы.</span></h1>
+        <p>GitRePosted автоматически переносит публикации между Telegram и МАКС. Вы выбираете источник и получателей — бот доставляет текст, фотографии, видео и файлы.</p>
+        <div class="hero-buttons">
+          <a class="btn btn-primary" data-platform-link="telegram" aria-disabled="true" target="_blank" rel="noopener"><img src="/assets/telegram.png" alt="">Начать в Telegram</a>
+          <a class="btn btn-secondary" data-platform-link="max" aria-disabled="true" target="_blank" rel="noopener"><img src="/assets/max.png" alt="">Открыть в МАКС</a>
+        </div>
+        <div class="hero-points"><span>Без ограничения каналов</span><span>Настройка прямо в боте</span></div>
+      </div>
+
+      <div class="product-card" aria-label="Пример автоматической пересылки">
+        <div class="product-head"><span>Активная пересылка</span><b><i></i> Работает</b></div>
+        <div class="route-channel">
+          <img src="/assets/telegram.png" alt="">
+          <div><small>Источник · Telegram</small><strong>Новости района</strong></div>
+          <span class="ok">✓</span>
+        </div>
+        <div class="route-path"><i></i><span>Публикация передаётся автоматически</span><i></i></div>
+        <div class="route-channel">
+          <img src="/assets/max.png" alt="">
+          <div><small>Получатель · МАКС</small><strong>Новости района</strong></div>
+          <span class="ok">✓</span>
+        </div>
+        <div class="post-preview">
+          <div class="preview-media"><span>MEDIA</span></div>
+          <div><strong>Новая публикация</strong><p>Текст и вложения доставлены в связанный канал.</p></div>
+        </div>
+        <div class="product-glow"></div>
+      </div>
+    </section>
+
+    <section class="messenger-bar shell" aria-label="Доступность ботов">
+      <div class="bar-title"><span>Запустить GitRePosted</span><small>Выберите удобный мессенджер</small></div>
+      <a data-platform-link="telegram" aria-disabled="true" target="_blank" rel="noopener"><img src="/assets/telegram.png" alt=""><span><b>Telegram</b><small>Перейти к боту</small></span><em class="state loading" data-public-state="telegram">Проверяем</em></a>
+      <a data-platform-link="max" aria-disabled="true" target="_blank" rel="noopener"><img src="/assets/max.png" alt=""><span><b>МАКС</b><small>Перейти к боту</small></span><em class="state loading" data-public-state="max">Проверяем</em></a>
+    </section>
+
+    <section class="features shell" id="about">
+      <div class="section-title"><span>ВОЗМОЖНОСТИ</span><h2>Пересылки без ручной работы</h2><p>Один понятный инструмент для всей сети ваших каналов.</p></div>
+      <div class="feature-grid">
+        <article class="feature large">
+          <div class="feature-icon route-icon"><span></span><i></i><span></span></div>
+          <h3>Между любыми каналами</h3>
+          <p>Telegram → МАКС, МАКС → Telegram и пересылки внутри одного мессенджера.</p>
+          <div class="route-tags"><span>Telegram</span><b>→</b><span>МАКС</span></div>
+        </article>
+        <article class="feature"><div class="feature-icon">↗</div><h3>Один во многие</h3><p>Отправляйте публикацию из одного источника сразу в несколько каналов.</p></article>
+        <article class="feature"><div class="feature-icon">↙</div><h3>Многие в один</h3><p>Собирайте публикации нескольких источников в одном выбранном канале.</p></article>
+        <article class="feature"><div class="feature-icon">▣</div><h3>Контент целиком</h3><p>Текст, фото, видео, альбомы и поддерживаемые документы передаются вместе.</p></article>
+        <article class="feature wide"><div class="feature-icon">⌁</div><div><h3>Управление в привычном чате</h3><p>Создавайте, временно отключайте, меняйте и удаляйте пересылки через меню бота — без отдельного приложения.</p></div><div class="menu-preview"><span>Создать пересылку</span><span>Настроенные пересылки</span><span>Добавить канал</span><span>Связь аккаунтов</span></div></article>
+      </div>
+    </section>
+
+    <section class="how" id="start">
+      <div class="shell">
+        <div class="section-title"><span>ПОДКЛЮЧЕНИЕ</span><h2>Три шага до первой пересылки</h2><p>Настройка занимает несколько минут и не требует технических знаний.</p></div>
+        <div class="steps">
+          <article><b>01</b><div class="step-mark">01</div><h3>Откройте бота</h3><p>Запустите GitRePosted в Telegram или МАКС и откройте раздел добавления канала.</p></article>
+          <article><b>02</b><div class="step-mark">02</div><h3>Дайте право публикации</h3><p><strong>Telegram:</strong> назначьте бота администратором только с правом публикации.<br><strong>МАКС:</strong> добавьте бота в участники, затем в администраторы с правом «Писать посты».</p></article>
+          <article><b>03</b><div class="step-mark">03</div><h3>Создайте маршрут</h3><p>Выберите, откуда брать публикации и в какие каналы их автоматически отправлять.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="control shell">
+      <div class="control-copy"><span>ВАШИ ДАННЫЕ</span><h2>Каждый управляет только своими каналами</h2><p>Каналы и пересылки привязаны к владельцу. Другие пользователи не видят их и не могут менять настройки.</p></div>
+      <div class="control-list"><div><i>✓</i><span><b>Минимальные права</b><small>Только публикация сообщений</small></span></div><div><i>✓</i><span><b>Раздельный доступ</b><small>Свои каналы у каждого пользователя</small></span></div><div><i>✓</i><span><b>Контроль маршрутов</b><small>Отключение и удаление в любой момент</small></span></div></div>
+    </section>
+
+    <section class="faq shell" id="faq">
+      <div class="section-title"><span>ВОПРОСЫ</span><h2>Коротко о главном</h2></div>
+      <div class="faq-list">
+        <details><summary>Как бот понимает, какие каналы принадлежат мне?<i>+</i></summary><p>Добавьте бота администратором канала, затем перешлите сообщение из этого канала в личный чат с GitRePosted. Бот проверит права и привяжет канал к вашему аккаунту.</p></details>
+        <details><summary>Какие права нужны боту?<i>+</i></summary><p>Только право публикации. В Telegram оставьте публикацию сообщений. В МАКС сначала добавьте бота в участники, затем назначьте администратором с единственным правом «Писать посты».</p></details>
+        <details><summary>Можно отправлять один пост в несколько каналов?<i>+</i></summary><p>Да. Один источник можно связать с любым количеством каналов-получателей.</p></details>
+        <details><summary>Что происходит с фотографиями и файлами?<i>+</i></summary><p>GitRePosted переносит поддерживаемые вложения вместе с текстом. Форматы, которые МАКС не принимает напрямую, бот безопасно упаковывает.</p></details>
+      </div>
+    </section>
+
+    <section class="cta shell">
+      <div><span>REPOSTED</span><h2>Публикуйте один раз.<br>Остальное сделает бот.</h2></div>
+      <div><p>Выберите мессенджер и настройте первую пересылку.</p><div class="hero-buttons"><a class="btn btn-primary" data-platform-link="telegram" aria-disabled="true" target="_blank" rel="noopener">Telegram</a><a class="btn btn-secondary" data-platform-link="max" aria-disabled="true" target="_blank" rel="noopener">МАКС</a></div></div>
+    </section>
+  </main>
+
+  <footer><div class="shell"><a class="logo" href="#top"><img src="/assets/reposted-logo.png" alt=""><span>GitRePosted</span></a><p>Автоматические пересылки между Telegram и МАКС.</p><span>© 2026</span></div></footer>
+
+  <script>
+    fetch('/api/public-status').then(r => r.json()).then(data => {
+      document.querySelectorAll('[data-platform-link]').forEach(el => {
+        const platform = el.dataset.platformLink;
+        let url;
+        try {
+          const candidate = new URL(data[platform]?.url || '');
+          const hostname = platform === 'telegram' ? 't.me' : 'max.ru';
+          if (data[platform]?.public === true && candidate.protocol === 'https:' && candidate.hostname === hostname
+            && !candidate.username && !candidate.password && !candidate.port && !candidate.search && !candidate.hash
+            && /^\/[A-Za-z0-9_]+$/.test(candidate.pathname)) url = candidate.href;
+        } catch {}
+        if (url) { el.href = url; el.removeAttribute('aria-disabled'); }
+        else { el.removeAttribute('href'); el.setAttribute('aria-disabled', 'true'); }
+      });
+      document.querySelectorAll('[data-public-state]').forEach(el => {
+        const enabled = Boolean(data[el.dataset.publicState]?.public);
+        el.textContent = enabled ? 'Публичный' : 'Приватный';
+        el.className = `state ${enabled ? 'public' : 'private'}`;
+      });
+    }).catch(() => document.querySelectorAll('[data-public-state]').forEach(el => { el.textContent = 'Недоступен'; el.className = 'state private'; }));
+  </script>
+</body>
+</html>
