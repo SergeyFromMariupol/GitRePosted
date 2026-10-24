@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { publicBaseInfo } from "./public-base.js";
 
 export function jsonConfiguration(filePath) {
   return path.extname(filePath).toLowerCase() === ".json";
@@ -101,6 +102,7 @@ export function applyRuntimeTimezone(values) {
 }
 
 export function validateRuntimeUrls(values) {
+  if (values.PUBLIC_BASE_URL) publicBaseInfo(values.PUBLIC_BASE_URL);
   for (const key of ["PUBLIC_BASE_URL", "TELEGRAM_API_BASE_URL", "MAX_API_BASE_URL", "TELEGRAM_BOT_URL", "MAX_BOT_URL"]) {
     if (!values[key]) continue;
     let url;

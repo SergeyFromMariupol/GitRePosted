@@ -87,4 +87,20 @@ group('installed JSON activation flags must be present and strictly typed',funct
   check((new InstallerApplication())->run(['action'=>'installation_state'])===['ok'=>true,'result'=>['configured'=>true,'telegram_enabled'=>true,'max_enabled'=>false]]);
  }finally{unlink($path);$previous===false?putenv('GITREPOSTED_ENV_FILE'):putenv('GITREPOSTED_ENV_FILE='.$previous);}
 });
+group('project mount is preserved in both provider endpoints and foreign mounts are rejected',function(){
+ foreach(['telegram','max']as$platform){
+  $f=fixture();$f->config['base_url']='https://bridge.example/GitRePosted';
+  check(app($f)->run(['action'=>'register','platform'=>$platform])['ok']);
+  $writes=array_values(array_filter($f->calls,fn($c)=>$c['path']===($platform==='telegram'?'setWebhook':'/subscriptions')&&$c['method']==='POST'));
+  check(count($writes)===1&&$writes[0]['body']['url']==='https://bridge.example/GitRePosted/webhooks/'.$platform);
+  $checked=app($f)->run(['action'=>'check','platform'=>$platform,'token'=>$f->config[$platform==='telegram'?'bot_token':'max_bot_token']]);
+  check($checked['ok']&&$checked['result']['existing_urls']===['https://bridge.example/GitRePosted/webhooks/'.$platform]);
+ }
+ foreach(['/GitPosted','/GitRePosted/','/other/../GitRePosted','/%47itRePosted','/GitRePosted?x=1']as$path){
+  $f=fixture();$f->config['base_url']='https://bridge.example'.$path;
+  $r=app($f)->run(['action'=>'register','platform'=>'telegram']);check(!$r['ok']&&$r['error']['code']==='INVALID_BASE_URL');
+  check(count(array_filter($f->calls,fn($c)=>$c['path']==='setWebhook'))===0);
+ }
+});
+
 echo "$groups application groups; failures=$failures\n";exit($failures?1:0);

@@ -40,7 +40,7 @@ try {
     if (Wizard::secure($_SERVER) && $sessionPath !== null && ($existingSession || $openingSession)) {
         session_name('gitreposted_setup');
         session_save_path($sessionPath);
-        session_set_cookie_params(['lifetime' => 0, 'path' => '/install/', 'secure' => true, 'httponly' => true, 'samesite' => 'Strict']);
+        session_set_cookie_params(['lifetime' => 0, 'path' => Wizard::pathPrefix($public) . '/install/', 'secure' => true, 'httponly' => true, 'samesite' => 'Strict']);
         if (!session_start()) throw new RuntimeException('Installer session unavailable.');
         $newSession = !$existingSession;
         $session =& $_SESSION;

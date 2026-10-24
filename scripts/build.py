@@ -24,13 +24,15 @@ EXPORT_MARKER = ".gitreposted-export.json"
 # Explicit names only. Never copy a private snapshot recursively.
 INSTALLER_FILES = (
     "bootstrap.sh", "README.md", "AGENTS.md", "LICENSE", "VERSION", ".gitignore", ".gitattributes",
-    "bin/application.php", "bin/cleanup.py", "lib/broker.py", "lib/provision.py", "lib/coinstall.py", "lib/Wizard.php",
+    "bin/application.php", "bin/cleanup.py", "lib/broker.py", "lib/provision.py", "lib/coinstall.py", "lib/gateway.py", "lib/Wizard.php",
     "web/api.php", "web/index.php", "web/assets/wizard.js", "web/assets/wizard.css",
     "scripts/build.py", "scripts/export.py", "scripts/release-loader.sh", "tests/package_test.py",
     "docs/INSTALLATION.md", "docs/CONFIGURATION.md", "docs/OPERATIONS.md", "docs/SECURITY.md",
     "docs/TESTING.md", "docs/RELEASING.md",
 )
 OPTIONAL_INSTALLER_FILES = (
+    "tests/mounted-gateway-test.py",
+    "tests/gateway-test.py", "tests/coinstall-prefix-test.py",
     "tests/coinstall-test.py", "tests/coinstall-provision-test.py", "tests/coinstall-broker-test.py",
     "tests/deep-coinstall-packages-test.py", "tests/deep-coinstall-nginx-test.py", "tests/deep-coinstall-state-test.cjs",
     "tests/application-test.php", "tests/broker-node-test.py", "tests/wizard-node-test.php",
@@ -44,7 +46,7 @@ OPTIONAL_INSTALLER_FILES = (
 RUNTIME_FILES = (
     "server.js", "package.json", "package-lock.json", ".env.example", "telegram-bot-api.env.example",
     "src/account-routing.js", "src/bot-ui.js", "src/config.js", "src/link-format.js",
-    "src/multipart-stream.js", "src/portable-runtime.js", "src/relay-idempotency.js",
+    "src/multipart-stream.js", "src/portable-runtime.js", "src/public-base.js", "src/relay-idempotency.js",
     "src/relay-media.js", "src/relay-retry.js", "src/relay-temp-file.js", "src/request-ip.js",
     "src/runtime-secrets.js", "src/security-state.js", "public/index.html", "public/app.js",
     "public/app.css", "public/landing.html", "public/landing.css", "public/landing-strict.css",
@@ -54,7 +56,7 @@ RUNTIME_FILES = (
 RUNTIME_TESTS = tuple("tests/runtime/" + name + ".test.mjs" for name in (
     "bot-ui", "link-format", "relay-idempotency", "relay-media", "relay-retry", "request-ip",
     "runtime-secrets", "security-state", "streaming-transfer", "portable-runtime", "portable-server",
-    "portable-webhook-setup",
+    "portable-webhook-setup", "mount-prefix",
 ))
 PUBLIC_FILES = frozenset(INSTALLER_FILES + OPTIONAL_INSTALLER_FILES + RUNTIME_TESTS
                          + tuple("payload/src/" + name for name in RUNTIME_FILES))

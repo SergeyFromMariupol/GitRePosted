@@ -2,6 +2,7 @@ import fs from "node:fs";
 import http from "node:http";
 import crypto from "node:crypto";
 import mysql from "mysql2/promise";
+import { publicBaseInfo, publicLocalPath, publicPathPrefix, renderPublicHtml } from "./src/public-base.js";
 import {
   applyRuntimeTimezone,
   createAdminPasswordHash,
@@ -105,6 +106,7 @@ function adminApiKeyConfigured() {
 
 function assertRuntimeConfiguration() {
   applyRuntimeTimezone(env);
+  if (env.PUBLIC_BASE_URL) publicBaseInfo(env.PUBLIC_BASE_URL);
   if (!adminApiKeyConfigured()) {
     throw new Error("ADMIN_API_KEY must be set to a non-placeholder secret before startup.");
   }
@@ -496,7 +498,15 @@ async function updateEditableConfig(payload) {
   }
 
   if (typeof payload.public_base_url === "string" && payload.public_base_url.trim()) {
-    nextEnv.PUBLIC_BASE_URL = payload.public_base_url.trim();
+    let proposed;
+    try { proposed = publicBaseInfo(payload.public_base_url); }
+    catch { const error = new Error("Укажите адрес HTTP(S) без параметров, с путём /GitRePosted или без пути."); error.statusCode = 400; throw error; }
+    if (proposed.pathPrefix !== publicPathPrefix(env.PUBLIC_BASE_URL)) {
+      const error = new Error("Путь приложения меняется через установщик вместе с настройками сайта. Сохраните текущий путь адреса.");
+      error.statusCode = 400;
+      throw error;
+    }
+    nextEnv.PUBLIC_BASE_URL = proposed.baseUrl;
   }
 
   if (payload.telegram && typeof payload.telegram === "object") {
@@ -6313,17 +6323,8 @@ function sendText(res, code, text, contentType = "text/plain; charset=utf-8") {
 }
 
 function requestPublicBaseUrl(_req) {
-  const configured = String(env.PUBLIC_BASE_URL || "").trim();
   try {
-    const url = new URL(configured);
-    if (!["http:", "https:"].includes(url.protocol)
-      || url.username
-      || url.password
-      || url.search
-      || url.hash) {
-      throw new Error("invalid public URL");
-    }
-    return url.toString().replace(/\/$/, "");
+    return publicBaseInfo(env.PUBLIC_BASE_URL).baseUrl;
   } catch {
     const error = new Error("PUBLIC_BASE_URL должен быть корректным HTTP(S)-адресом без query и fragment.");
     error.statusCode = 400;
@@ -6402,13 +6403,13 @@ function createAdminSession(res) {
   if (!adminSessions.register(sessionId, expiresAt)) {
     throw new Error("Не удалось создать административную сессию.");
   }
-  res.setHeader("set-cookie", `reposted_admin_session=${sessionId}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${ADMIN_SESSION_TTL_MS / 1000}`);
+  res.setHeader("set-cookie", `reposted_admin_session=${sessionId}; Path=${publicLocalPath(env.PUBLIC_BASE_URL, "/")}; HttpOnly; Secure; SameSite=Strict; Max-Age=${ADMIN_SESSION_TTL_MS / 1000}`);
 }
 
 function clearAdminSession(req, res) {
   const sessionId = parseCookies(req).reposted_admin_session;
   if (sessionId) adminSessions.revoke(sessionId);
-  res.setHeader("set-cookie", "reposted_admin_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0");
+  res.setHeader("set-cookie", `reposted_admin_session=; Path=${publicLocalPath(env.PUBLIC_BASE_URL, "/")}; HttpOnly; Secure; SameSite=Strict; Max-Age=0`);
 }
 
 async function verifyHcaptcha(req, token) {
@@ -8549,14 +8550,14 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/landing.html")) {
-      return sendText(res, 200, await readStaticFile("landing.html"), "text/html; charset=utf-8");
+      return sendText(res, 200, renderPublicHtml(await readStaticFile("landing.html"), env.PUBLIC_BASE_URL), "text/html; charset=utf-8");
     }
     if (req.method === "GET" && url.pathname === "/index.html") {
-      res.writeHead(301, { location: "/control/" });
+      res.writeHead(301, { location: publicLocalPath(env.PUBLIC_BASE_URL, "/control/") });
       return res.end();
     }
     if (req.method === "GET" && (url.pathname === "/control" || url.pathname === "/control/")) {
-      return sendText(res, 200, await readStaticFile("index.html"), "text/html; charset=utf-8");
+      return sendText(res, 200, renderPublicHtml(await readStaticFile("index.html"), env.PUBLIC_BASE_URL), "text/html; charset=utf-8");
     }
     if (req.method === "GET" && url.pathname === "/landing.css") {
       return sendText(res, 200, await readStaticFile("landing.css"), "text/css; charset=utf-8");

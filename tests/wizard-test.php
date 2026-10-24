@@ -200,6 +200,21 @@ $tests['host and retry reject paths commands foreign IP and email injection']=st
     }
 };
 
+$tests['fixed project mount scopes setup metadata without weakening host or origin checks']=static function():void{
+    $f=fixtureWizard();$f->public['base_url'].='/GitRePosted';$f->public['path_prefix']='/GitRePosted';
+    expectWizard('/GitRePosted',Wizard::pathPrefix($f->public));
+    $r=requestWizard($f,'status',method:'GET');expectWizard(200,$r['status']);
+    expectWizard('/GitRePosted',$r['body']['result']['path_prefix']);
+    expectWizard('https://203.0.113.10/GitRePosted/control/',$r['body']['result']['admin_url']);
+    loginWizard($f);expectWizard(200,requestWizard($f,'start',['settings'=>settingsWizard()])['status']);
+    foreach(['/GitPosted','/GitRePosted/','/other/../GitRePosted','/%47itRePosted']as$path){
+        $f->public['base_url']='https://203.0.113.10'.$path;
+        expectWizard(403,requestWizard($f,'status',method:'GET')['status']);
+    }
+    $f->public['base_url']='https://203.0.113.10/GitRePosted';$f->public['path_prefix']='';
+    expectWizard(403,requestWizard($f,'status',method:'GET')['status']);
+};
+
 $failed=0;
 foreach($tests as$name=>$test){try{$test();echo 'PASS '.$name.PHP_EOL;}catch(Throwable$error){$failed++;fwrite(STDERR,'FAIL '.$name.': '.$error->getMessage().PHP_EOL);}}
 echo count($tests).' wizard groups; failures='.$failed.PHP_EOL;

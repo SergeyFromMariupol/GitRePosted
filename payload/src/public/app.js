@@ -1,3 +1,10 @@
+const APP_BASE_PATH = document.querySelector('meta[name="gitreposted-base-path"]')?.content || "";
+if (!["", "/GitRePosted"].includes(APP_BASE_PATH)) throw new Error("Invalid application path.");
+function localUrl(route) {
+  if (typeof route !== "string" || !route.startsWith("/") || route.startsWith("//")) throw new Error("Invalid application route.");
+  return APP_BASE_PATH + route;
+}
+
 const state = {
   currentBot: localStorage.getItem("reposted_bot_view") || "telegram",
   currentSection: "users",
@@ -74,7 +81,7 @@ function closeToast() {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(localUrl(path), {
     ...options,
     credentials: "same-origin",
     headers: {
@@ -146,7 +153,7 @@ function hideLogin() {
 }
 
 async function setupHcaptcha() {
-  const response = await fetch("/api/auth-config", { credentials: "same-origin" });
+  const response = await fetch(localUrl("/api/auth-config"), { credentials: "same-origin" });
   if (!response.ok) throw new Error("Не удалось загрузить настройки входа.");
   const data = await response.json();
   hcaptchaEnabled = data.hcaptcha_enabled !== false;
@@ -259,9 +266,9 @@ function createListItem(title, subtitle, meta = [], actions = []) {
 }
 
 function createBridgeItem(row) {
-  const sourceIcon = row.source_platform === "telegram" ? "/assets/telegram.png" : "/assets/max.png";
+  const sourceIcon = row.source_platform === "telegram" ? localUrl("/assets/telegram.png") : localUrl("/assets/max.png");
   const targets = row.targets || [];
-  const targetNames = targets.map((target) => `<span class="bridge-target"><img src="${target.platform === "telegram" ? "/assets/telegram.png" : "/assets/max.png"}" alt="">${escapeHtml(target.title || target.chat_id)}</span>`).join('<span class="bridge-target-separator">,</span>');
+  const targetNames = targets.map((target) => `<span class="bridge-target"><img src="${target.platform === "telegram" ? localUrl("/assets/telegram.png") : localUrl("/assets/max.png")}" alt="">${escapeHtml(target.title || target.chat_id)}</span>`).join('<span class="bridge-target-separator">,</span>');
   return `
     <article class="list-item bridge-item ${String(state.selectedBridgeId) === String(row.id) ? "selected" : ""}">
       <button type="button" class="bridge-summary" data-select-bridge="${escapeHtml(row.id)}">
@@ -316,7 +323,7 @@ function bridgeDirectionText(direction) {
 
 function renderChannels() {
   const platformName = state.currentBot === "telegram" ? "Telegram" : "МАКС";
-  const iconPath = state.currentBot === "telegram" ? "/assets/telegram.png" : "/assets/max.png";
+  const iconPath = state.currentBot === "telegram" ? localUrl("/assets/telegram.png") : localUrl("/assets/max.png");
   $("channelsPanelTitle").textContent = state.currentBot === "telegram" ? "Каналы Telegram" : "Каналы МАКС";
   const channels = botChannels();
   const totalPages = Math.max(1, Math.ceil(channels.length / state.perPage));
@@ -504,7 +511,7 @@ function renderAdminUsers() {
 
 function renderAccountChannelRows(account, platform) {
   return (account.channels || []).filter((channel) => channel.platform === platform).map((channel) => `
-    <div class="account-channel-row"><span><img src="/assets/${platform === "max" ? "max" : "telegram"}.png" alt="">${escapeHtml(channel.title)}</span><span>
+    <div class="account-channel-row"><span><img src="${APP_BASE_PATH}/assets/${platform === "max" ? "max" : "telegram"}.png" alt="">${escapeHtml(channel.title)}</span><span>
       <button data-channel-action="block_channel" data-id="${account.id}" data-platform="${channel.platform}" data-chat="${escapeHtml(channel.chat_id)}" data-blocked="${channel.is_blocked ? "1" : "0"}" class="ghost icon-button" title="${channel.is_blocked ? "Разрешить канал" : "Запретить канал"}"><i class="fa-solid ${channel.is_blocked ? "fa-check" : "fa-ban"}"></i></button>
       <button data-channel-action="delete_channel" data-id="${account.id}" data-platform="${channel.platform}" data-chat="${escapeHtml(channel.chat_id)}" class="danger icon-button" title="Удалить канал и его пересылки"><i class="fa-solid fa-trash"></i></button>
     </span></div>`).join("") || `<div class="empty-channel-list">Каналов пока нет</div>`;
@@ -513,9 +520,9 @@ function renderAccountChannelRows(account, platform) {
 function renderAccountRoutes(account) {
   return (account.routes || []).map((route) => {
     const sourceIcon = route.source_platform === "max" ? "max" : "telegram";
-    const targets = (route.targets || []).map((target) => `<span><img src="/assets/${target.platform === "max" ? "max" : "telegram"}.png" alt="">${escapeHtml(target.title || target.chat_id)}</span>`).join('<i class="fa-solid fa-plus"></i>');
+    const targets = (route.targets || []).map((target) => `<span><img src="${APP_BASE_PATH}/assets/${target.platform === "max" ? "max" : "telegram"}.png" alt="">${escapeHtml(target.title || target.chat_id)}</span>`).join('<i class="fa-solid fa-plus"></i>');
     return `<div class="account-route-row">
-      <div class="account-route-path"><span><img src="/assets/${sourceIcon}.png" alt="">${escapeHtml(route.source_title || route.source_chat_id)}</span><i class="fa-solid fa-arrow-right"></i><span class="account-route-targets">${targets}</span></div>
+      <div class="account-route-path"><span><img src="${APP_BASE_PATH}/assets/${sourceIcon}.png" alt="">${escapeHtml(route.source_title || route.source_chat_id)}</span><i class="fa-solid fa-arrow-right"></i><span class="account-route-targets">${targets}</span></div>
       <div class="account-route-actions">
         <button data-route-action="toggle" data-route-id="${escapeHtml(route.id)}" class="ghost icon-button" title="${route.enabled ? "Выключить" : "Включить"}"><i class="fa-solid ${route.enabled ? "fa-bell" : "fa-bell-slash"}"></i></button>
         <button data-route-action="delete" data-route-id="${escapeHtml(route.id)}" class="danger icon-button" title="Удалить"><i class="fa-solid fa-trash"></i></button>
@@ -529,14 +536,14 @@ function renderAccounts() {
     <article class="list-item account-card">
       <div class="account-summary" data-account-toggle="${account.id}"><div>
         <div class="account-display-names">
-          ${account.telegram_user_id ? `<span><img src="/assets/telegram.png" alt="Telegram"><strong>${escapeHtml(account.telegram_name || account.telegram_username || `Telegram ${account.telegram_user_id}`)}</strong></span>` : ""}
+          ${account.telegram_user_id ? `<span><img src="${APP_BASE_PATH}/assets/telegram.png" alt="Telegram"><strong>${escapeHtml(account.telegram_name || account.telegram_username || `Telegram ${account.telegram_user_id}`)}</strong></span>` : ""}
           ${account.telegram_user_id && account.max_user_id ? '<span class="account-name-join">и</span>' : ""}
-          ${account.max_user_id ? `<span><img src="/assets/max.png" alt="МАКС"><strong>${escapeHtml(account.max_name || account.max_username || `МАКС ${account.max_user_id}`)}</strong></span>` : ""}
+          ${account.max_user_id ? `<span><img src="${APP_BASE_PATH}/assets/max.png" alt="МАКС"><strong>${escapeHtml(account.max_name || account.max_username || `МАКС ${account.max_user_id}`)}</strong></span>` : ""}
         </div>
       </div><div class="account-summary-actions">
         <button data-account-action="block_all" data-id="${account.id}" class="account-block-button ${account.is_blocked ? "is-blocked" : ""}" title="${account.is_blocked ? "Разблокировать полностью" : "Заблокировать полностью"}" aria-label="${account.is_blocked ? "Разблокировать полностью" : "Заблокировать полностью"}"><i class="fa-solid ${account.is_blocked ? "fa-lock-open" : "fa-user-lock"}"></i></button>
-        <button data-account-action="block_tg" data-id="${account.id}" class="account-block-button platform-block-button ${account.telegram_blocked ? "is-blocked" : ""}" title="${account.telegram_blocked ? "Разблокировать Telegram" : "Заблокировать Telegram"}" aria-label="${account.telegram_blocked ? "Разблокировать Telegram" : "Заблокировать Telegram"}"><img src="/assets/telegram.png" alt=""><i class="fa-solid fa-ban"></i></button>
-        <button data-account-action="block_max" data-id="${account.id}" class="account-block-button platform-block-button ${account.max_blocked ? "is-blocked" : ""}" title="${account.max_blocked ? "Разблокировать МАКС" : "Заблокировать МАКС"}" aria-label="${account.max_blocked ? "Разблокировать МАКС" : "Заблокировать МАКС"}"><img src="/assets/max.png" alt=""><i class="fa-solid fa-ban"></i></button>
+        <button data-account-action="block_tg" data-id="${account.id}" class="account-block-button platform-block-button ${account.telegram_blocked ? "is-blocked" : ""}" title="${account.telegram_blocked ? "Разблокировать Telegram" : "Заблокировать Telegram"}" aria-label="${account.telegram_blocked ? "Разблокировать Telegram" : "Заблокировать Telegram"}"><img src="${APP_BASE_PATH}/assets/telegram.png" alt=""><i class="fa-solid fa-ban"></i></button>
+        <button data-account-action="block_max" data-id="${account.id}" class="account-block-button platform-block-button ${account.max_blocked ? "is-blocked" : ""}" title="${account.max_blocked ? "Разблокировать МАКС" : "Заблокировать МАКС"}" aria-label="${account.max_blocked ? "Разблокировать МАКС" : "Заблокировать МАКС"}"><img src="${APP_BASE_PATH}/assets/max.png" alt=""><i class="fa-solid fa-ban"></i></button>
         <button data-account-action="delete_bridges" data-id="${account.id}" class="ghost icon-button" title="Удалить все пересылки"><i class="fa-solid fa-link-slash"></i></button>
         <button data-account-action="delete_channel_links" data-id="${account.id}" class="danger icon-button" title="Удалить каналы и пересылки"><i class="fa-solid fa-trash-can"></i></button>
         <i class="fa-solid fa-chevron-down account-chevron"></i>
@@ -544,11 +551,11 @@ function renderAccounts() {
       <div class="account-details hidden" data-account-details="${account.id}">
       <div class="account-profile-grid">
         <div class="account-profile-card">
-          <div class="account-profile-title"><img src="/assets/telegram.png" alt="Telegram"><strong>Telegram</strong></div>
+          <div class="account-profile-title"><img src="${APP_BASE_PATH}/assets/telegram.png" alt="Telegram"><strong>Telegram</strong></div>
           <dl><div><dt>Имя</dt><dd>${escapeHtml(account.telegram_name || "Не указано")}</dd></div><div><dt>ID</dt><dd>${escapeHtml(account.telegram_user_id || "Не связан")}</dd></div><div><dt>Ник</dt><dd>${account.telegram_username ? `@${escapeHtml(account.telegram_username)}` : "Не указан"}</dd></div><div><dt>Каналов</dt><dd>${(account.channels || []).filter((channel) => channel.platform === "telegram").length}</dd></div></dl>
         </div>
         <div class="account-profile-card">
-          <div class="account-profile-title"><img src="/assets/max.png" alt="МАКС"><strong>МАКС</strong></div>
+          <div class="account-profile-title"><img src="${APP_BASE_PATH}/assets/max.png" alt="МАКС"><strong>МАКС</strong></div>
           <dl><div><dt>Имя</dt><dd>${escapeHtml(account.max_name || "Не указано")}</dd></div><div><dt>ID</dt><dd>${escapeHtml(account.max_user_id || "Не связан")}</dd></div><div><dt>Ник</dt><dd>${account.max_username ? `@${escapeHtml(account.max_username)}` : "Не указан"}</dd></div><div><dt>Каналов</dt><dd>${(account.channels || []).filter((channel) => channel.platform === "max").length}</dd></div></dl>
         </div>
         <div class="account-bridge-total"><span>Пересылок между каналами</span><strong>${account.bridge_count}</strong></div>
@@ -558,8 +565,8 @@ function renderAccounts() {
         <div class="account-routes-list hidden" data-account-section="routes-${account.id}">${renderAccountRoutes(account)}</div>
       </section>
       <div class="account-channel-columns">
-        <section class="account-channel-column account-subsection"><header data-account-section-toggle="telegram-${account.id}"><span><img src="/assets/telegram.png" alt="Telegram"><strong>Каналы Telegram</strong></span><span class="account-subsection-meta"><b>${(account.channels || []).filter((channel) => channel.platform === "telegram").length}</b><i class="fa-solid fa-chevron-down account-subsection-chevron"></i></span></header><div class="account-channel-list hidden" data-account-section="telegram-${account.id}">${renderAccountChannelRows(account, "telegram")}</div></section>
-        <section class="account-channel-column account-subsection"><header data-account-section-toggle="max-${account.id}"><span><img src="/assets/max.png" alt="МАКС"><strong>Каналы МАКС</strong></span><span class="account-subsection-meta"><b>${(account.channels || []).filter((channel) => channel.platform === "max").length}</b><i class="fa-solid fa-chevron-down account-subsection-chevron"></i></span></header><div class="account-channel-list hidden" data-account-section="max-${account.id}">${renderAccountChannelRows(account, "max")}</div></section>
+        <section class="account-channel-column account-subsection"><header data-account-section-toggle="telegram-${account.id}"><span><img src="${APP_BASE_PATH}/assets/telegram.png" alt="Telegram"><strong>Каналы Telegram</strong></span><span class="account-subsection-meta"><b>${(account.channels || []).filter((channel) => channel.platform === "telegram").length}</b><i class="fa-solid fa-chevron-down account-subsection-chevron"></i></span></header><div class="account-channel-list hidden" data-account-section="telegram-${account.id}">${renderAccountChannelRows(account, "telegram")}</div></section>
+        <section class="account-channel-column account-subsection"><header data-account-section-toggle="max-${account.id}"><span><img src="${APP_BASE_PATH}/assets/max.png" alt="МАКС"><strong>Каналы МАКС</strong></span><span class="account-subsection-meta"><b>${(account.channels || []).filter((channel) => channel.platform === "max").length}</b><i class="fa-solid fa-chevron-down account-subsection-chevron"></i></span></header><div class="account-channel-list hidden" data-account-section="max-${account.id}">${renderAccountChannelRows(account, "max")}</div></section>
       </div></div>
     </article>`).join("") || createListItem("Пользователей нет", "Связанные аккаунты появятся после запуска ботов.");
   $$('[data-account-toggle]').forEach((button) => button.onclick = () => {
@@ -795,7 +802,7 @@ async function loginWithPasskey() {
 }
 
 async function bootstrap() {
-  const session = await fetch("/api/session", { credentials: "same-origin" });
+  const session = await fetch(localUrl("/api/session"), { credentials: "same-origin" });
   if (!session.ok) {
     showLogin();
     return;
@@ -822,7 +829,7 @@ $("loginForm").onsubmit = async (event) => {
     showLogin("Подтвердите, что вы не робот.");
     return;
   }
-  const response = await fetch("/api/login", {
+  const response = await fetch(localUrl("/api/login"), {
     method: "POST",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },
@@ -1112,9 +1119,9 @@ $("restartService").onclick = async () => {
   let restored = false;
   for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
-      const response = await fetch(`/health?restart=${Date.now()}`, { cache: "no-store" });
+      const response = await fetch(localUrl(`/health?restart=${Date.now()}`), { cache: "no-store" });
       if (response.ok) {
-        const session = await fetch("/api/session", { credentials: "same-origin" });
+        const session = await fetch(localUrl("/api/session"), { credentials: "same-origin" });
         if (session.status === 401) {
           button.disabled = false;
           window.hcaptcha?.reset();

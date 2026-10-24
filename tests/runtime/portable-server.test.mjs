@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const executeFile = promisify(execFile);
-const application = fileURLToPath(new URL("../../payload/src/", import.meta.url));
+const application = process.env.GITREPOSTED_RUNTIME_SOURCE || fileURLToPath(new URL("../../payload/src/", import.meta.url));
 const passwordHash = "scrypt$16384$8$1$00000000000000000000000000000000$1004ee38ce027a2729879b60928c49d36fd9a7f9ecec9a6158419822c30b160a";
 
 function fixture() {
@@ -99,7 +99,7 @@ async function startCapturedServer(data) {
   });
   const base = `http://127.0.0.1:${port}`;
   return { child, request: (route, body, headers = {}) => fetch(base + route, {
-    method: body === undefined ? "GET" : "POST", headers: { "content-type": "application/json", ...headers },
+    method: body === undefined ? "GET" : "POST", redirect: "manual", headers: { "content-type": "application/json", ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) })
   }) };
 }
@@ -225,6 +225,48 @@ test("captured real HTTP handlers authenticate, rotate credentials atomically, a
   } finally {
     await stopCapturedServer(child);
     fs.rmSync(data.directory, { recursive: true });
+  }
+});
+
+test("mounted HTTP handlers scope sessions, redirects, assets and configuration without trusting proxy prefix headers", async () => {
+  for (const prefix of ["", "/GitRePosted"]) {
+    const data = fixture();
+    let child;
+    try {
+      data.config.PUBLIC_BASE_URL = "https://shared.example" + prefix;
+      fs.writeFileSync(data.configPath, JSON.stringify(data.config));
+      const server = await startCapturedServer(data);
+      child = server.child;
+      const { request } = server;
+      const html = await (await request("/control/", undefined, { "x-forwarded-prefix": "/untrusted" })).text();
+      assert.ok(html.includes(`name="gitreposted-base-path" content="${prefix}"`));
+      assert.ok(html.includes(`src="${prefix}/app.js?`));
+      assert.ok(!html.includes("/untrusted"));
+      const redirect = await request("/index.html");
+      assert.equal(redirect.status, 301);
+      assert.equal(redirect.headers.get("location"), prefix + "/control/");
+      assert.equal((await request("/app.js")).status, 200);
+      const login = await request("/api/login", { username: "operator", password: "correct horse battery staple" });
+      assert.equal(login.status, 200);
+      assert.ok(login.headers.get("set-cookie").includes(`; Path=${prefix}/;`));
+      const cookie = login.headers.get("set-cookie").split(";")[0];
+      const config = (await (await request("/api/config", undefined, { cookie })).json()).config;
+      assert.equal(config.telegram.webhook_url, "https://shared.example" + prefix + "/webhooks/telegram");
+      const options = await (await request("/api/passkeys/register/options", {}, { cookie })).json();
+      assert.equal(options.options.rp.id, "shared.example");
+      // Routing configuration belongs to the installer; the UI cannot silently change its mount.
+      const otherPrefix = prefix ? "" : "/GitRePosted";
+      assert.equal((await request("/api/config", { public_base_url: "https://shared.example" + otherPrefix }, { cookie })).status, 400);
+      assert.equal(JSON.parse(fs.readFileSync(data.configPath, "utf8")).PUBLIC_BASE_URL, data.config.PUBLIC_BASE_URL);
+      const logout = await request("/api/logout", {}, { cookie });
+      assert.equal(logout.status, 200);
+      assert.ok(logout.headers.get("set-cookie").includes(`; Path=${prefix}/;`));
+      assert.match(logout.headers.get("set-cookie"), /Max-Age=0/);
+      assert.doesNotMatch(fs.readFileSync(data.ledgerPath, "utf8"), /PROVIDER_FORBIDDEN|SET state = 'processing'/);
+    } finally {
+      await stopCapturedServer(child);
+      fs.rmSync(data.directory, { recursive: true });
+    }
   }
 });
 

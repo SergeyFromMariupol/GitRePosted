@@ -11,11 +11,16 @@
         return match ? match[1] : null;
     }
 
+    function setupPath() {
+        const pathname = root.location && root.location.pathname;
+        return /^\/GitRePosted\/install(?:\/|$)/.test(pathname || '') ? '/GitRePosted/install/' : '/install/';
+    }
+
     // A fragment never reaches the HTTP request. Remove it before any API call.
     let enrollmentCode = root.location ? setupCodeFromFragment(root.location.hash) : null;
     let invalidSetupLink = Boolean(root.location && root.location.hash && !enrollmentCode);
     if (root.location && root.location.hash) {
-        try { root.history.replaceState(null, '', '/install/'); }
+        try { root.history.replaceState(null, '', setupPath()); }
         catch (_) { enrollmentCode = null; invalidSetupLink = true; }
     }
 
@@ -541,7 +546,7 @@
         if (!/^#setup(?:=|$)/.test(fragment)) return;
         const code = setupCodeFromFragment(fragment);
         let scrubbed = false;
-        try { root.history.replaceState(null, '', '/install/'); scrubbed = true; }
+        try { root.history.replaceState(null, '', setupPath()); scrubbed = true; }
         catch (_) { /* Never submit a code still visible in the address bar. */ }
         // Opening another setup link must not reset entered settings, interrupt
         // an active job, or replay enrollment while its outcome is pending.

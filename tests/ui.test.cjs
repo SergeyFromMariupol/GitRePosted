@@ -70,6 +70,9 @@ test('webhook display hides userinfo, query and fragments', () => {
 
 test('navigation accepts only HTTPS destinations without credentials or query', () => {
     assert.equal(ui.safeHttpsUrl('https://posts.example', 'control/'), 'https://posts.example/control/');
+    assert.equal(ui.safeHttpsUrl('https://posts.example/GitRePosted', 'control/'), 'https://posts.example/GitRePosted/control/');
+    assert.equal(ui.safeHttpsUrl('https://posts.example/GitRePosted', 'install/'), 'https://posts.example/GitRePosted/install/');
+    assert.deepEqual(ui.foreignWebhookUrls(['https://posts.example/GitRePosted/webhooks/telegram'], 'telegram', 'https://posts.example/GitRePosted'), []);
     for (const value of ['http://posts.example', 'javascript:alert(1)', '//posts.example', 'https://user:fixture@posts.example', 'https://posts.example?code=fixture', 'https://posts.example/#code']) assert.equal(ui.safeHttpsUrl(value, 'install/'), null);
 });
 

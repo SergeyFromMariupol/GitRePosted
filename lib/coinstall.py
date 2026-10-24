@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import fcntl
+import importlib.util
 import ipaddress
 import json
 import os
@@ -19,7 +20,9 @@ from urllib.parse import urlsplit
 
 ROOT = Path('/')
 PROJECTS = ('gitposted', 'gitreposted')
+PREFIXES = {'gitposted': '/GitPosted', 'gitreposted': '/GitRePosted'}
 _held = threading.local()
+_gateway_library = None
 
 
 class CoInstallError(Exception):
@@ -189,13 +192,16 @@ def passive_apache_stub():
         _fail('UNMANAGED_WEB_SERVER', 'Обнаружена конфигурация Apache за пределами штатного неактивного PHP-FPM-файла. Совместная установка остановлена.')
 
 
-def _managed_sites(project, peer):
+def _managed_sites(project, peer, *, gateway_verified=False):
     _nginx_main()
     enabled = _path('/etc/nginx/sites-enabled')
     _parents(enabled)
     seen = set()
     for item in enabled.iterdir():
-        if item.name not in {project + '-installer', peer + '-installer'}:
+        allowed = {project + '-installer', peer + '-installer'}
+        if gateway_verified:
+            allowed.add('gitposted-suite')
+        if item.name not in allowed:
             _fail('UNMANAGED_WEB_SERVER', 'Обнаружены другие сайты nginx. Автоматическая совместная установка остановлена.')
         info = item.lstat()
         if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0 \
@@ -205,11 +211,77 @@ def _managed_sites(project, peer):
         seen.add(item.name)
     if peer + '-installer' not in seen:
         _fail()
+    if gateway_verified and 'gitposted-suite' not in seen:
+        _fail()
     conf = _path('/etc/nginx/conf.d')
     if conf.exists() or conf.is_symlink():
         _parents(conf)
         if any(conf.iterdir()):
             _fail('UNMANAGED_WEB_SERVER', 'Обнаружена дополнительная конфигурация nginx. Автоматическая установка остановлена.')
+
+
+def _prefix(project, value):
+    if value not in ('', PREFIXES[project]):
+        _fail('INVALID_PREFIX', 'Не удалось проверить постоянный путь проекта. Существующие настройки сохранены.')
+    return value
+
+
+def _gateway():
+    """Use the installed gateway's parser; fixtures inject only the filesystem root."""
+    global _gateway_library
+    if _gateway_library is None:
+        spec = importlib.util.spec_from_file_location('suite_gateway_trust', Path(__file__).with_name('gateway.py'))
+        _gateway_library = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_gateway_library)
+    _gateway_library.ROOT = ROOT
+    return _gateway_library
+
+
+def _routing_projection_matches(descriptor, expected, authorities, *, complete):
+    if complete:
+        return descriptor == expected
+    compared = {key: value for key, value in descriptor.items() if key not in ('installed', 'tls_ready')}
+    wanted = {key: value for key, value in expected.items() if key not in ('installed', 'tls_ready')}
+    # Domain jobs commit nginx and their browser checkpoint separately. A
+    # missing pending key or a stale canonical hostname is safe only when both
+    # projections already claim every involved name as a certificate alias.
+    # Immutable identity and the alias lists themselves must still agree.
+    aliases = set(descriptor['acme_hosts']).intersection(expected['acme_hosts'])
+    for key in ('pending_host', 'site_host'):
+        if descriptor.get(key) == expected.get(key):
+            continue
+        names = {value for value in (descriptor.get(key), expected.get(key)) if value}
+        if not names or not names.issubset(aliases) or not names.issubset(authorities):
+            return False
+        compared.pop(key, None)
+        wanted.pop(key, None)
+    return compared == wanted
+
+
+def _verify_gateway(project, peer, public, *, complete):
+    """A prefix claim alone never authorizes shared hosts or existing services."""
+    gateway = _gateway()
+    try:
+        registry = gateway.read_registry()
+        descriptor = registry['projects'].get(peer)
+        if descriptor is None and not complete:
+            return False
+        if public is None or descriptor is None:
+            _fail()
+        expected = gateway._descriptor(peer, public)
+        if not _routing_projection_matches(descriptor, expected, registry['authorities'], complete=complete):
+            _fail()
+        site = _regular(_path(gateway.SITE)).decode('utf-8')
+        if site != gateway.render_registry(registry):
+            _fail('UNMANAGED_WEB_SERVER', 'Общая конфигурация nginx не соответствует проверенному состоянию маршрутов.')
+        for name in registry['projects']:
+            content = _regular(_path('/etc/nginx/sites-available/' + name + '-installer')).decode('utf-8')
+            if content != gateway._backend(name, content):
+                _fail()
+        _managed_sites(project, peer, gateway_verified=True)
+        return True
+    except gateway.GatewayError:
+        _fail()
 
 
 def inspect_peer(project, ip=None, *, require_complete=True):
@@ -233,6 +305,9 @@ def inspect_peer(project, ip=None, *, require_complete=True):
             _fail()
         if type(bootstrap.get('shared_host', False)) is not bool:
             _fail()
+        prefix = _prefix(peer, bootstrap.get('path_prefix', ''))
+        if 'routing_schema' in bootstrap and (not prefix or type(bootstrap['routing_schema']) is not int or bootstrap['routing_schema'] != 1):
+            _fail()
         peer_ip = _host(bootstrap.get('public_ip'))
         if not ipaddress.ip_address(peer_ip).is_global or (ip is not None and peer_ip != ip):
             _fail('PEER_ADDRESS_MISMATCH', 'Соседний проект настроен на другой публичный IP. Проверьте адрес сервера.')
@@ -240,6 +315,12 @@ def inspect_peer(project, ip=None, *, require_complete=True):
         public = _optional_json(state / 'public.json')
         if public is not None:
             if public.get('public_ip') != peer_ip:
+                _fail()
+            if _prefix(peer, public.get('path_prefix', '')) != prefix:
+                _fail()
+            if prefix and (public.get('host') != bootstrap.get('host')
+                           or public.get('base_url') != 'https://' + _host(bootstrap['host']) + prefix
+                           or public.get('site_url') != 'https://' + _host(public.get('site_host', public.get('host'))) + prefix):
                 _fail()
             hosts.add(_host(public.get('host')))
             hosts.add(_host(public.get('site_host', public.get('host'))))
@@ -258,44 +339,62 @@ def inspect_peer(project, ip=None, *, require_complete=True):
             hosts.add(_host(pending.get('host')))
         marker = _optional_json(state / 'installed.json', private=True)
         complete = marker is not None
+        routing_verified = False
         if not complete:
             if require_complete:
                 _fail('PEER_INCOMPLETE', 'Сначала завершите установку другого проекта, затем повторите эту команду.')
+            if prefix:
+                routing_verified = _verify_gateway(project, peer, public, complete=False)
             return {'project': peer, 'hosts': sorted(hosts), 'public_ip': peer_ip, 'complete': False,
-                    'shared_host': bool(bootstrap.get('shared_host', False)), 'site_url': None, 'version': None}
+                    'shared_host': bool(bootstrap.get('shared_host', False)), 'site_url': None, 'version': None,
+                    'path_prefix': prefix, 'routing_verified': routing_verified, 'host': _host(bootstrap['host']),
+                    'site_host': _host(public.get('site_host', public.get('host'))) if public else _host(bootstrap['host'])}
         if not public or public.get('installed') is not True or public.get('tls_ready') is not True \
                 or type(marker.get('installed_at')) is not int or marker['installed_at'] <= 0 \
                 or not isinstance(marker.get('version'), str) or not 1 <= len(marker['version']) <= 100:
             _fail()
         url = urlsplit(marker.get('admin_url', ''))
         if url.scheme != 'https' or url.netloc != _host(public.get('site_host')) \
-                or url.path != '/control/' or url.query or url.fragment \
-                or public.get('site_url') != 'https://' + url.netloc:
+                or url.path != prefix + '/control/' or url.query or url.fragment \
+                or public.get('site_url') != 'https://' + url.netloc + prefix \
+                or ('path_prefix' in marker and marker['path_prefix'] != prefix):
+            _fail()
+        if prefix and public.get('base_url') != 'https://' + _host(public['host']) + prefix:
             _fail()
         app_identity = pwd.getpwnam(peer)
         _regular(_path('/etc/' + peer + ('/config.php' if peer == 'gitposted' else '/config.json')),
                  owner=app_identity.pw_uid, app_config=True)
-        site = _path('/etc/nginx/sites-available/' + peer + '-installer')
-        content = _regular(site).decode('utf-8')
-        site_names = {name for names in re.findall(r'\bserver_name\s+([^;]+);', content) for name in names.split() if name != '_'}
-        if not {_host(public['host']), _host(public['site_host'])}.issubset(site_names):
-            _fail()
-        hosts.update(_host(name) for name in site_names)
-        _managed_sites(project, peer)
+        if prefix:
+            routing_verified = _verify_gateway(project, peer, public, complete=True)
+        else:
+            site = _path('/etc/nginx/sites-available/' + peer + '-installer')
+            content = _regular(site).decode('utf-8')
+            site_names = {name for names in re.findall(r'\bserver_name\s+([^;]+);', content) for name in names.split() if name != '_'}
+            if not {_host(public['host']), _host(public['site_host'])}.issubset(site_names):
+                _fail()
+            hosts.update(_host(name) for name in site_names)
+            _managed_sites(project, peer)
         return {'project': peer, 'hosts': sorted(hosts), 'public_ip': peer_ip, 'complete': True,
-                'shared_host': bool(bootstrap.get('shared_host', False)), 'site_url': public['site_url'], 'version': marker['version']}
+                'shared_host': bool(bootstrap.get('shared_host', False)), 'site_url': public['site_url'], 'version': marker['version'],
+                'path_prefix': prefix, 'routing_verified': routing_verified, 'host': _host(bootstrap['host']),
+                'site_host': _host(public['site_host'])}
     except CoInstallError:
         raise
     except (OSError, ValueError, KeyError, TypeError, UnicodeError):
         _fail()
 
 
-def validate_hosts(project, hosts, ip=None):
+def validate_hosts(project, hosts, ip=None, *, path_prefix=None):
+    _project(project)
+    if path_prefix is not None:
+        _prefix(project, path_prefix)
     candidate = {_host(value) for value in hosts if value}
     if not candidate:
         _fail()
     peer = inspect_peer(project, ip, require_complete=False)
-    if peer and candidate.intersection(peer['hosts']):
+    shared_prefixes = peer and path_prefix == PREFIXES[project] \
+        and peer.get('path_prefix') == PREFIXES[peer['project']] and peer.get('routing_verified') is True
+    if peer and candidate.intersection(peer['hosts']) and not shared_prefixes:
         _fail('HOST_IN_USE', 'Этот адрес уже используется другим проектом. Укажите отдельный домен или поддомен через --host.')
     return peer
 

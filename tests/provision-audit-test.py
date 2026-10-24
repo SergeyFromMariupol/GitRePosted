@@ -27,6 +27,17 @@ spec.loader.exec_module(p)
 
 
 class ProvisionAuditTests(unittest.TestCase):
+    def setUp(self):
+        # Source/publication fixtures must not inspect either installation on
+        # the machine running the suite. Individual recovery tests override
+        # this disposable state with their own explicit checkpoints.
+        temporary = tempfile.TemporaryDirectory(prefix='gitreposted-source-audit-')
+        self.addCleanup(temporary.cleanup)
+        state = patch.object(p, 'STATE', Path(temporary.name) / 'absent')
+        peer = patch.object(p, 'peer_installation', return_value=None)
+        state.start(); self.addCleanup(state.stop)
+        peer.start(); self.addCleanup(peer.stop)
+
     @contextlib.contextmanager
     def bundle_io(self, target):
         """Real temp files; adapt only unavailable ownership/fsync/rename APIs.

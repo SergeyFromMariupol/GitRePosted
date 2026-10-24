@@ -8,10 +8,16 @@ passed a clean-server or real-provider test unless docs/TESTING.md records it.
   src/ contains ESM modules and public/ contains the active UI.
 - bootstrap.sh and lib/provision.py prepare an isolated installation.
 - lib/coinstall.py is identical in both projects. It verifies the completed
-  sibling installation, reserves distinct hosts and serializes shared changes.
+  sibling installation, validates host/path claims and serializes shared changes.
   Support both installation orders without adopting arbitrary existing sites
   or upgrading the sibling's packages. Keep databases, data, users, services and
-  bot tokens separate. The second project requires its own DNS hostname.
+  bot tokens separate. Two new rc.8 installations use the fixed /GitPosted and
+  /GitRePosted paths on a shared IP, shared domain or different domains.
+  lib/gateway.py owns the common nginx routing and root-only registry. One
+  authority has one public nginx server and one certificate owner; the other
+  project reuses its HTTPS. Scope installer/admin cookies to their app paths.
+  A verified older root installation retains the legacy layout and requires
+  an explicit different DNS hostname for its sibling; never migrate it silently.
   lib/broker.py owns privileged actions; bin/application.php is its bounded
   child for provider checks and the Node schema CLI. PHP is not the bot runtime.
 - Never put real configuration, tokens, keys, database exports, messages,

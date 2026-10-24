@@ -193,7 +193,7 @@ final class InstallerApplication
             }
             // Foreign webhook paths or query strings can contain other services' secrets.
             $path = (string) ($parts['path'] ?? '/');
-            if (!in_array($path, ['/', '/webhooks/telegram', '/webhooks/max'], true)
+            if (!in_array($path, ['/', '/webhooks/telegram', '/webhooks/max', '/GitRePosted/webhooks/telegram', '/GitRePosted/webhooks/max'], true)
                 || $scheme !== $parts['scheme'] || isset($parts['user']) || isset($parts['pass']) || isset($parts['query']) || isset($parts['fragment'])) {
                 // Removing private URL components must not turn a foreign
                 // endpoint into the exact URL owned by this installation.
@@ -251,8 +251,8 @@ final class InstallerApplication
         if (filter_var($base, FILTER_VALIDATE_URL) === false || preg_match('/[\x00-\x20\x7f]/', $base)
             || !is_array($parts) || ($parts['scheme'] ?? '') !== 'https' || !isset($parts['host'])
             || isset($parts['user']) || isset($parts['pass']) || isset($parts['query']) || isset($parts['fragment'])
-            || !in_array($parts['path'] ?? '', ['', '/'], true) || str_ends_with($base, '/')) {
-            throw new InstallerApplicationFailure('INVALID_BASE_URL', 'Адрес приложения должен быть HTTPS origin без завершающего слеша.');
+            || !in_array($parts['path'] ?? '', ['', '/GitRePosted'], true) || str_ends_with($base, '/') || str_contains($base, '\\')) {
+            throw new InstallerApplicationFailure('INVALID_BASE_URL', 'Адрес приложения должен быть HTTPS origin с путём /GitRePosted или без пути, без завершающего слеша.');
         }
         return $base . ($platform === 'telegram' ? '/webhooks/telegram' : '/webhooks/max');
     }

@@ -2,6 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8">
+  <meta name="gitreposted-base-path" content="">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Бесплатная автопересылка постов между Telegram и МАКС. GitRePosted — открытый код MIT, свои боты и сервер, без платы за каждый канал. Установка с GitHub.">
   <meta name="robots" content="index,follow,max-image-preview:large">
@@ -95,7 +96,9 @@
   </main>
   <footer><div class="shell"><a class="logo" href="#top"><img src="/assets/reposted-logo.png" alt="" width="42" height="42"><span>GitRePosted</span></a><p>Автопересылка Telegram ↔ МАКС · Бесплатный код MIT</p><div class="footer-links"><a href="https://github.com/SergeyFromMariupol/GitRePosted" target="_blank" rel="noopener">GitHub ↗</a><a href="/control/">Панель этой установки</a></div></div></footer>
   <script>
-    fetch('/api/public-status').then(r => r.json()).then(data => {
+    const appBasePath = document.querySelector('meta[name="gitreposted-base-path"]')?.content || '';
+    if (!['', '/GitRePosted'].includes(appBasePath)) throw new Error('Invalid application path.');
+    fetch(appBasePath + '/api/public-status').then(r => r.json()).then(data => {
       document.querySelectorAll('[data-platform-link]').forEach(el => {
         const platform = el.dataset.platformLink;
         let url;

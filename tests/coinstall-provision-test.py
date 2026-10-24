@@ -299,6 +299,7 @@ class CoInstallProvisionTests(unittest.TestCase):
         with patch.object(p.os, 'geteuid', return_value=0, create=True), \
              patch.object(sys, 'argv', ['provision.py', '--dry-run', '--host', 'relay.example.org', '--public-ip', '8.8.8.8']), \
              patch.object(p, 'shared_lock', side_effect=lambda **_: contextlib.nullcontext()) as lock, \
+             patch.object(p, 'peer_installation', return_value=None), \
              patch.object(p, 'preflight', return_value=True), patch.object(p, 'dns_matches'), patch.object(p, 'initialize_state') as state, \
              patch.object(p, 'install') as install, contextlib.redirect_stdout(io.StringIO()) as output:
             p.main()

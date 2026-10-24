@@ -19,20 +19,21 @@ test.before(async () => { browser = await chromium.launch({ headless: true, ...(
 test.after(async () => { if (browser) await browser.close(); });
 
 async function fixture(options = {}) {
+    const prefix = options.prefix || '';
     const context = await browser.newContext({ viewport: options.viewport || { width: 1365, height: 1000 } });
     const page = await context.newPage();
     const calls = [];
     const errors = [];
     const status = {
         authenticated: false, secure: options.http !== true, installed: false,
-        base_url: 'https://installer.example', host: 'installer.example', public_ip: 'Server IP',
-        site_url: 'https://installer.example', site_host: 'installer.example', csrf: 'a'.repeat(64),
+        base_url: 'https://installer.example' + prefix, host: 'installer.example', public_ip: 'Server IP',
+        site_url: 'https://installer.example' + prefix, site_host: 'installer.example', path_prefix: prefix, csrf: 'a'.repeat(64),
         job: { id: '', type: 'install', status: 'idle', steps: [] }, ...options.status
     };
     page.on('pageerror', (error) => errors.push(error.message));
     await context.route('**/*', async (route) => {
         const request = route.request(); const url = new URL(request.url());
-        if (url.pathname === '/install/api.php') {
+        if (url.pathname === prefix + '/install/api.php') {
             const action = url.searchParams.get('action');
             const body = request.method() === 'POST' ? request.postDataJSON() : null;
             calls.push({ action, body, method: request.method(), url: request.url(), csrf: request.headers()['x-csrf-token'], addressHadFragment: Boolean(new URL(page.url()).hash) });
@@ -53,11 +54,12 @@ async function fixture(options = {}) {
             await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, result }) });
             return;
         }
-        if (assets[url.pathname]) { await route.fulfill({ status: 200, contentType: assets[url.pathname][0], body: assets[url.pathname][1] }); return; }
+        const asset = url.pathname.startsWith(prefix + '/install/') ? assets[url.pathname.slice(prefix.length)] : null;
+        if (asset) { await route.fulfill({ status: 200, contentType: asset[0], body: asset[1] }); return; }
         await route.abort('blockedbyclient');
     });
     const fragment = options.fragment !== undefined ? options.fragment : (options.autoLogin === false ? '' : '#setup=' + 'x'.repeat(32));
-    await page.goto((options.http ? 'http' : 'https') + '://installer.example/install/' + fragment);
+    await page.goto((options.http ? 'http' : 'https') + '://installer.example' + prefix + '/install/' + fragment);
     return { page, context, calls, status, errors, close: async () => { assert.deepEqual(errors, []); await context.close(); } };
 }
 
@@ -109,6 +111,30 @@ test('setup link logs in automatically after removing fragment from the address'
         assert.equal(f.calls.some((call) => call.url.includes('setup=') || call.url.includes('x'.repeat(32))), false);
         assert.equal(await f.page.locator('#login-form').count(), 0);
     } finally { await f.close(); }
+});
+
+test('mounted setup enrollment, API and completion keep their project path on a shared host', async () => {
+    const prefix = '/GitRePosted';
+    const f = await fixture({ prefix });
+    try {
+        await login(f);
+        assert.equal(f.page.url(), 'https://installer.example' + prefix + '/install/');
+        assert.deepEqual(f.calls.find(call => call.action === 'login').body, { code: 'x'.repeat(32) });
+        assert.equal(f.calls.every(call => new URL(call.url).pathname === prefix + '/install/api.php'), true);
+        assert.equal(f.calls.every(call => !call.addressHadFragment), true);
+        f.status.installed = true; f.status.authenticated = false;
+        f.status.admin_url = 'https://installer.example' + prefix + '/control/';
+        await f.page.reload();
+        await f.page.locator('#complete-screen').waitFor({ state: 'visible' });
+        assert.equal(await f.page.locator('#control-link').getAttribute('href'), f.status.admin_url);
+    } finally { await f.close(); }
+    const http = await fixture({ prefix, http: true });
+    try {
+        await http.page.locator('#http-screen').waitFor({ state: 'visible' });
+        assert.equal(http.page.url(), 'http://installer.example' + prefix + '/install/');
+        assert.equal(await http.page.locator('#https-link').getAttribute('href'), 'https://installer.example' + prefix + '/install/');
+        assert.equal(http.calls.some(call => call.method === 'POST'), false);
+    } finally { await http.close(); }
 });
 
 test('setup link pasted into an open login page enrolls once without reloading the document', async () => {

@@ -593,7 +593,8 @@ class Broker:
             candidate = {**self.public, 'installed': True, 'admin_url': config['base_url'] + '/control/'}
             p.configure_nginx(candidate)
             p.save_json(p.STATE / 'installed.json', {'installed_at': int(time.time()), 'version': p.VERSION,
-                                                   'admin_url': candidate['admin_url']})
+                                                   'admin_url': candidate['admin_url'], 'path_prefix': p.path_prefix(candidate),
+                                                   **({'routing_schema': 1} if p.path_prefix(candidate) else {})})
             self.public.update(candidate)
             # Retain configuration only in /etc/gitreposted; remove duplicate root-held credentials.
             self.private.pop('settings', None)
@@ -617,7 +618,7 @@ class Broker:
             p.configure_nginx({**self.public, 'pending_host': host})
             p.obtain_certificate(host, ip, settings['email'])
         elif step == 'nginx':
-            candidate = {**self.public, 'site_host': host, 'site_url': 'https://' + host,
+            candidate = {**self.public, 'site_host': host, 'site_url': 'https://' + host + p.path_prefix(self.public),
                          'acme_hosts': host_aliases(self.public, host),
                          'allowed_hosts': list(dict.fromkeys([self.public['host'], host]))}
             candidate.pop('pending_host', None)

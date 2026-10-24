@@ -158,13 +158,19 @@ final class Wizard
         return in_array($server['HTTPS'] ?? null, ['on', '1', 1, true], true);
     }
 
+    public static function pathPrefix(array $public): string
+    {
+        return parse_url((string) ($public['base_url'] ?? ''), PHP_URL_PATH) === '/GitRePosted' ? '/GitRePosted' : '';
+    }
+
     public static function trustedHost(array $server, array $public): bool
     {
         $authority = self::authority((string) ($server['HTTP_HOST'] ?? ''));
         $base = parse_url((string) ($public['base_url'] ?? ''));
         if ($authority === null || !is_array($base) || !isset($base['host']) || isset($base['user']) || isset($base['pass'])
             || !in_array($base['scheme'] ?? '', ['http', 'https'], true)
-            || !in_array($base['path'] ?? '', ['', '/'], true) || isset($base['query']) || isset($base['fragment'])) return false;
+            || !in_array($base['path'] ?? '', ['', '/', '/GitRePosted'], true) || isset($base['query']) || isset($base['fragment'])
+            || (isset($public['path_prefix']) && $public['path_prefix'] !== self::pathPrefix($public))) return false;
         $configuredHost = self::hostText((string) $base['host']);
         $publicHost = self::hostText((string) ($public['host'] ?? ''));
         $allowed = (array) ($public['allowed_hosts'] ?? [$publicHost]);
@@ -194,7 +200,7 @@ final class Wizard
                     // Job and host/completion metadata must describe the same root checkpoint.
                     // Never spread arbitrary broker fields into the HTTP response.
                     $fresh = array_intersect_key($broker, array_flip(['installed', 'tls_ready', 'base_url', 'host',
-                        'public_ip', 'site_url', 'site_host', 'allowed_hosts']));
+                        'public_ip', 'site_url', 'site_host', 'allowed_hosts', 'path_prefix']));
                     $public = array_replace($public, $fresh);
                     if (!is_bool($public['installed'] ?? null) || !is_bool($public['tls_ready'] ?? null)
                         || !self::trustedHost($server, $public)) throw new \RuntimeException('Invalid root status.');
@@ -204,7 +210,8 @@ final class Wizard
                     'installed' => $public['installed'], 'base_url' => (string) $public['base_url'], 'host' => (string) $public['host'],
                     'public_ip' => (string) ($public['public_ip'] ?? ''), 'tls_ready' => $public['tls_ready'],
                     'site_url' => (string) ($public['site_url'] ?? $public['base_url']),
-                    'site_host' => (string) ($public['site_host'] ?? $public['host']), 'job' => null];
+                    'site_host' => (string) ($public['site_host'] ?? $public['host']),
+                    'path_prefix' => self::pathPrefix($public), 'job' => null];
                 $result['admin_url'] = rtrim($result['site_url'], '/') . '/control/';
                 if ($authenticated && !$public['installed']) {
                     $result['csrf'] = $this->session['csrf'];

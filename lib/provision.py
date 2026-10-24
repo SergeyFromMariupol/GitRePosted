@@ -28,7 +28,9 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
-VERSION = '0.1.0-rc.7'
+VERSION = '0.1.0-rc.8'
+PATH_PREFIX = '/GitRePosted'
+BACKEND_PORT = 8182
 INSTALL = Path('/opt/gitreposted-installer')
 APP = Path('/opt/gitreposted')
 STATE = Path('/var/lib/gitreposted-installer')
@@ -71,6 +73,33 @@ _coinstall_spec = importlib.util.spec_from_file_location('gitreposted_coinstall'
 coinstall = importlib.util.module_from_spec(_coinstall_spec)
 _coinstall_spec.loader.exec_module(coinstall)
 
+_gateway_spec = importlib.util.spec_from_file_location('gitreposted_gateway', Path(__file__).with_name('gateway.py'))
+gateway = importlib.util.module_from_spec(_gateway_spec)
+_gateway_spec.loader.exec_module(gateway)
+
+
+def path_prefix(public):
+    if not isinstance(public, dict) or public.get('path_prefix', '') not in ('', PATH_PREFIX):
+        raise Failure('STATE_CONFLICT', 'Некорректный путь приложения в состоянии установки.')
+    prefix = public.get('path_prefix', '')
+    if prefix and (type(public.get('routing_schema')) is not int or public['routing_schema'] != 1):
+        raise Failure('STATE_CONFLICT', 'Не подтверждена версия общей маршрутизации.')
+    return prefix
+
+
+def installation_prefix(ip, resume=False):
+    if resume:
+        return path_prefix(read_json(STATE / 'bootstrap.json', {}))
+    peer = peer_installation(ip)
+    return '' if peer and not peer.get('path_prefix') else PATH_PREFIX
+
+
+def gateway_call(operation, *args):
+    try:
+        return operation(*args)
+    except gateway.GatewayError as error:
+        raise Failure(error.code, str(error)) from None
+
 
 @contextmanager
 def shared_lock(*, create=True):
@@ -100,7 +129,7 @@ def ensure_hosts_available(public):
     if public.get('pending_host'):
         hosts.append(host_name(public['pending_host']))
     try:
-        return coinstall.validate_hosts('gitreposted', hosts, public.get('public_ip'))
+        return coinstall.validate_hosts('gitreposted', hosts, public.get('public_ip'), path_prefix=path_prefix(public))
     except coinstall.CoInstallError as error:
         raise Failure(error.code, str(error)) from None
 
@@ -466,12 +495,14 @@ def preflight(resume=False, *, host=None, ip=None, explicit_host=True):
         if not isinstance(marker, dict) or marker.get('installer') != 'gitreposted-clean-v1' or (STATE / 'installed.json').exists():
             raise Failure('RESUME_UNAVAILABLE', 'Нет незавершённой установки для продолжения.')
         shared_host = marker.get('shared_host', False)
+        prefix = path_prefix(marker)
         if type(shared_host) is not bool:
             raise Failure('STATE_CONFLICT', 'Некорректный режим совместной установки.')
         if shared_host and peer_installation(ip) is None:
             raise Failure('PEER_MISSING', 'Первый проект больше не подтверждён. Восстановите его до продолжения второго.')
         if host:
-            ensure_hosts_available({'host': host, 'public_ip': ip})
+            ensure_hosts_available({'host': host, 'public_ip': ip, 'path_prefix': prefix,
+                                    **({'routing_schema': 1} if prefix else {})})
         return shared_host
     for path in (INSTALL, APP, STATE, DATA, CONFIG.parent, LOG, SITE, ENABLED_SITE, NODE_ROOT):
         if path.exists() or path.is_symlink():
@@ -483,16 +514,18 @@ def preflight(resume=False, *, host=None, ip=None, explicit_host=True):
             continue
         raise Failure('EXISTING_USER', 'Системный пользователь GitRePosted уже существует.')
     peer = peer_installation(ip)
-    if peer and (not explicit_host or not host or host == ip):
+    prefix = '' if peer and not peer.get('path_prefix') else PATH_PREFIX
+    if peer and not prefix and (not explicit_host or not host or host == ip):
         raise Failure('SECOND_HOST_REQUIRED', 'Для второго проекта нужен отдельный домен или поддомен. Направьте его на сервер и добавьте --host example.org.')
     if host:
-        ensure_hosts_available({'host': host, 'public_ip': ip})
+        ensure_hosts_available({'host': host, 'public_ip': ip, 'path_prefix': prefix,
+                                **({'routing_schema': 1} if prefix else {})})
     if peer:
         verify_passive_apache_stub()
     for service in (('mariadb',) if peer else ('nginx', 'apache2', 'mysql', 'mariadb')):
         if shutil.which(service) or Path('/etc/' + service).exists():
             raise Failure('EXISTING_SERVICE', 'На сервере уже есть web-сервер или MySQL. Автоматическая установка остановлена.')
-    for port in ((3010,) if peer else (80, 443, 3010, 3306)):
+    for port in (((3010, BACKEND_PORT) if prefix else (3010,)) if peer else (80, 443, 3010, BACKEND_PORT, 3306)):
         for af, addr in ((socket.AF_INET, '0.0.0.0'), (socket.AF_INET6, '::')):
             try:
                 with socket.socket(af, socket.SOCK_STREAM) as sock:
@@ -733,19 +766,22 @@ def publish_initial_state(source, target):
         raise Failure('STATE_UNAVAILABLE', 'Не удалось сохранить начальное состояние установки.')
 
 
-def initialize_state(ip, host, shared_host=False):
+def initialize_state(ip, host, shared_host=False, path_prefix=''):
     """Publish marker and lock together, so every visible state can resume.
 
     A killed process before publication may leave an unpublished private
     sibling. It is never adopted or searched for by later installations.
     """
+    if path_prefix not in ('', PATH_PREFIX):
+        raise Failure('STATE_CONFLICT', 'Некорректный путь новой установки.')
     if STATE.exists() or STATE.is_symlink() or not STATE.is_absolute() or STATE.parent.resolve() != STATE.parent:
         raise Failure('EXISTING_INSTALLATION', 'Каталог состояния уже существует или имеет неожиданный путь.')
     temporary = STATE.parent / ('.' + STATE.name + '-initial.' + secrets.token_hex(8))
     temporary.mkdir(mode=0o700)
     try:
         save_json(temporary / 'bootstrap.json', {'installer': 'gitreposted-clean-v1', 'public_ip': ip, 'host': host,
-                                                 'shared_host': shared_host})
+                                                 'shared_host': shared_host, 'path_prefix': path_prefix,
+                                                 **({'routing_schema': 1} if path_prefix else {})})
         descriptor = os.open(temporary / 'installer.lock', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
             os.fsync(descriptor)
@@ -801,6 +837,19 @@ def obtain_certificate(host, ip, email=''):
         if not isinstance(public, dict):
             raise Failure('STATE_CONFLICT', 'Некорректное состояние HTTPS этой установки.')
         ensure_hosts_available({**public, 'host': public.get('host', host), 'pending_host': host, 'public_ip': ip})
+        if path_prefix(public):
+            # Claims and the HTTP-01 route must be committed before requesting TLS.
+            configure_nginx({**public, 'pending_host': host})
+            authority = gateway_call(gateway.get_authority, host)
+            if not authority:
+                raise Failure('TLS_STATE', 'Не найден владелец сертификата общего адреса.')
+            if authority['owner'] != 'gitreposted':
+                if authority['tls_ready'] is not True:
+                    raise Failure('TLS_OWNER_NOT_READY', 'Сначала завершите настройку HTTPS в первом установщике этого адреса.')
+                return
+            _obtain_certificate(host, ip, email)
+            gateway_call(gateway.mark_tls_ready, 'gitreposted', host, run)
+            return
         if public.get('host') and host not in [public['host'], public.get('site_host'), *public.get('acme_hosts', [])]:
             # A second named vhost cannot depend on the first site's default
             # ACME root. Broker state reserves this candidate before the call.
@@ -844,15 +893,24 @@ def renew_certificates():
         public = read_json(STATE / 'public.json', {})
         if not isinstance(public, dict) or public.get('tls_ready') is not True:
             raise Failure('TLS_NOT_READY', 'HTTPS этой установки ещё не настроен.')
-        ensure_hosts_available(public)
-        hosts = list(dict.fromkeys([host_name(public['host']),
-                                   host_name(public.get('site_host', public['host'])),
-                                   *[host_name(host) for host in public.get('acme_hosts', [])]]))
+        if path_prefix(public):
+            registry = gateway_call(gateway.read_registry)
+            own = registry.get('projects', {}).get('gitreposted')
+            immutable = ('host', 'public_ip', 'path_prefix')
+            if not isinstance(own, dict) or any(own.get(key) != public.get(key) for key in immutable):
+                raise Failure('TLS_STATE', 'Состояние общей маршрутизации не совпадает с адресом этой установки.')
+            hosts = [host for host, authority in registry['authorities'].items()
+                     if authority['owner'] == 'gitreposted' and authority['tls_ready']]
+        else:
+            ensure_hosts_available(public)
+            hosts = list(dict.fromkeys([host_name(public['host']),
+                                       host_name(public.get('site_host', public['host'])),
+                                       *[host_name(host) for host in public.get('acme_hosts', [])]]))
         failed = []
         for host in hosts:
             try:
                 if not renewal_config_exists(host):
-                    if host in {public['host'], public.get('site_host', public['host'])}:
+                    if path_prefix(public) or host in {public['host'], public.get('site_host', public['host'])}:
                         raise Failure('TLS_STATE', 'Отсутствует настройка продления действующего HTTPS-адреса.')
                     continue  # A reserved candidate may never have passed issuance.
                 run([CERTBOT, 'renew', '--quiet', '--no-random-sleep-on-renew', '--cert-name', cert_name(host),
@@ -870,7 +928,64 @@ def renew_certificates():
             raise Failure(code, 'Не все сертификаты удалось проверить или продлить. Остальные допустимые сертификаты обработаны; проверьте настройки HTTPS, DNS и доступность HTTP.')
 
 
+def backend_nginx_content(public):
+    prefix = path_prefix(public)
+    if not prefix:
+        raise Failure('STATE_CONFLICT', 'Внутренний сайт требует постоянного пути проекта.')
+    status_location = f'''location = /install/api.php {{
+client_max_body_size 64k; include fastcgi_params;
+fastcgi_param HTTPS on;
+fastcgi_param REQUEST_URI $http_x_original_uri;
+fastcgi_param SCRIPT_FILENAME {INSTALL}/web/api.php;
+fastcgi_read_timeout 50s; fastcgi_pass unix:/run/php/gitreposted-installer.sock;
+}}'''
+    wizard = (status_location + '\nlocation = /install { return 404; }\nlocation /install/ { return 404; }'
+              if public.get('installed') else f'''
+location = /install {{ return 302 {prefix}/install/; }}
+location = /install/ {{
+include fastcgi_params; fastcgi_param HTTPS on;
+fastcgi_param REQUEST_URI $http_x_original_uri;
+fastcgi_param SCRIPT_FILENAME {INSTALL}/web/index.php;
+fastcgi_pass unix:/run/php/gitreposted-installer.sock;
+}}
+{status_location}
+location ^~ /install/assets/ {{ alias {INSTALL}/web/assets/; add_header X-Content-Type-Options nosniff always; }}
+location /install/ {{ return 404; }}''')
+    proxy = '''proxy_pass http://127.0.0.1:3010;
+proxy_http_version 1.1;
+proxy_set_header Host $host;
+proxy_set_header X-Forwarded-Proto https;
+proxy_set_header X-Forwarded-For $remote_addr;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header Connection "";
+proxy_connect_timeout 5s;
+proxy_read_timeout 60s;'''
+    private = '''location ~ /\\. { return 404; }
+location ~* \\.(?:php|py|sql|gz|ini|log|json|sh|md|pem|lock|env)(?:/|$) { return 404; }
+location ~* ^/(?:src|node_modules|certs|secrets|data|runtime|storage|deployment|tools|bin|lib|scripts)(?:/|$) { return 404; }
+location = /server.js { return 404; }
+location = /app.js.map { return 404; }'''
+    return f'''server {{
+listen 127.0.0.1:{BACKEND_PORT};
+server_name _;
+absolute_redirect off;
+port_in_redirect off;
+set_real_ip_from 127.0.0.1;
+real_ip_header X-Real-IP;
+real_ip_recursive off;
+client_max_body_size 2m;
+{wizard}
+location = /webhooks/telegram {{ client_max_body_size 2m; {proxy} }}
+location = /webhooks/max {{ client_max_body_size 2m; {proxy} }}
+{private}
+location / {{ {proxy if public.get('installed') else 'return 302 ' + prefix + '/install/;'} }}
+}}
+'''
+
+
 def nginx_content(public):
+    if path_prefix(public):
+        return backend_nginx_content(public)
     base_host = host_name(public['host'])
     site_host = host_name(public.get('site_host', base_host))
     installed = public.get('installed', False)
@@ -945,6 +1060,10 @@ add_header X-Content-Type-Options nosniff always;
 def configure_nginx(public):
     with shared_lock():
         ensure_hosts_available(public)
+        if path_prefix(public):
+            routed = gateway_call(gateway.configure, 'gitreposted', public, backend_nginx_content(public), run)
+            public.update(routed)
+            return
         return _configure_nginx(public)
 
 
@@ -995,7 +1114,7 @@ UMask=0077
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=/etc/gitreposted /etc/nginx /var/lib/gitreposted /var/lib/gitreposted-installer /var/log/gitreposted /etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt /run
+ReadWritePaths=/etc/gitreposted /etc/nginx /var/lib/gitreposted /var/lib/gitreposted-installer -/var/lib/gitposted-suite {ACME} /var/log/gitreposted /etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt /run
 [Install]
 WantedBy=multi-user.target
 ''', 0o644)
@@ -1130,8 +1249,8 @@ def installer_lock():
         os.close(fd)
 
 
-def show_link(host, code):
-    print('\nOpen this personal one-time link:\nhttps://' + host + '/install/#setup=' + code
+def show_link(host, code, prefix=''):
+    print('\nOpen this personal one-time link:\nhttps://' + host + prefix + '/install/#setup=' + code
           + '\nThe browser signs in automatically. The fragment is not sent in the HTTP URL. Keep this link private.', flush=True)
 
 
@@ -1156,12 +1275,15 @@ def reconcile_installed():
         host = host_name(url.netloc)
     except (Failure, ValueError):
         raise Failure('STATE_CONFLICT', 'Некорректный адрес завершённой установки.') from None
-    if url.scheme != 'https' or url.netloc != host or url.path != '/control/' or url.query or url.fragment:
+    prefix = path_prefix(marker)
+    if url.scheme != 'https' or url.netloc != host or url.path != prefix + '/control/' or url.query or url.fragment:
         raise Failure('STATE_CONFLICT', 'Некорректный адрес завершённой установки.')
     public = read_json(STATE / 'public.json', {})
     private = read_json(STATE / 'private.json', {})
     if not isinstance(public, dict) or not isinstance(private, dict):
         raise Failure('STATE_CONFLICT', 'Состояние завершённой установки недоступно.')
+    if path_prefix(public) != prefix:
+        raise Failure('STATE_CONFLICT', 'Путь завершённой установки не совпадает с её отметкой.')
     job = public.get('job', {})
     if not isinstance(job, dict):
         job = {}
@@ -1170,7 +1292,7 @@ def reconcile_installed():
     job['steps'] = [{**step, 'status': 'skipped' if step.get('status') == 'skipped' else 'done'}
                     for step in steps if isinstance(step, dict)] if isinstance(steps, list) else []
     public.update({'installed': True, 'admin_url': marker['admin_url'], 'version': marker['version'],
-                   'site_url': 'https://' + host, 'site_host': host, 'job': job})
+                   'site_url': 'https://' + host + prefix, 'site_host': host, 'job': job})
     for key in ('settings', 'config', 'enrollment', 'job', 'public_state', 'bot_bindings'):
         private.pop(key, None)
     # Remove duplicate credentials before publishing terminal public metadata.
@@ -1223,7 +1345,7 @@ def resume_ready():
     code = enrollment()
     run(['systemctl', 'daemon-reload'])
     run(['systemctl', 'enable', '--now', 'gitreposted-installer.service', 'gitreposted-cert-renew.timer', 'gitreposted-rate-limit-cleanup.timer'])
-    show_link(host_name(public['host']), code)
+    show_link(host_name(public['host']), code, path_prefix(public))
     return True
 
 
@@ -1611,12 +1733,15 @@ def install(source, ip, host, resume=False, checked=False, package=None):
         shared_host = read_json(STATE / 'bootstrap.json', {}).get('shared_host', False)
     if type(shared_host) is not bool:
         raise Failure('STATE_CONFLICT', 'Некорректный режим совместной установки.')
+    marker = read_json(STATE / 'bootstrap.json', {})
+    prefix = path_prefix(marker) if marker else installation_prefix(ip, resume)
     dns_matches(host, ip)
     files = package_files(source) if package is None else package
     print('Preflight passed. Installing GitRePosted dependencies...', flush=True)
     directory(STATE, 0o700)
     save_json(STATE / 'bootstrap.json', {'installer': 'gitreposted-clean-v1', 'public_ip': ip, 'host': host,
-                                         'shared_host': shared_host})
+                                         'shared_host': shared_host, 'path_prefix': prefix,
+                                         **({'routing_schema': 1} if prefix else {})})
     # The curl loader removes its temporary archive on every exit. Persist a
     # complete root-owned resume entry point before apt/network operations.
     persist_bundle(source, files)
@@ -1655,8 +1780,9 @@ def install(source, ip, host, resume=False, checked=False, package=None):
         default.unlink()  # Preflight guaranteed nginx did not exist before this installer.
     directory(ACME, 0o755)
     public = read_json(STATE / 'public.json', {})
-    public.update({'version': VERSION, 'public_ip': ip, 'host': host, 'base_url': 'https://' + host,
-                   'site_host': host, 'site_url': 'https://' + host, 'allowed_hosts': [host],
+    public.update({'version': VERSION, 'public_ip': ip, 'host': host, 'base_url': 'https://' + host + prefix,
+                   'site_host': host, 'site_url': 'https://' + host + prefix, 'allowed_hosts': [host],
+                   'path_prefix': prefix, **({'routing_schema': 1} if prefix else {}),
                    'shared_host': shared_host,
                    'tls_ready': False, 'installed': False, 'job': {'status': 'idle', 'steps': []}})
     save_json(STATE / 'public.json', public, True)
@@ -1670,7 +1796,7 @@ def install(source, ip, host, resume=False, checked=False, package=None):
     run(['systemctl', 'daemon-reload'])
     run(['systemctl', 'enable', '--now', 'nginx', 'mysql', 'php8.3-fpm', 'gitreposted-installer.service',
          'gitreposted-cert-renew.timer', 'gitreposted-rate-limit-cleanup.timer'])
-    show_link(host, code)
+    show_link(host, code, prefix)
 
 
 @contextmanager
@@ -1726,7 +1852,7 @@ def main():
                     shared_host = preflight(args.resume, host=host, ip=ip, explicit_host=bool(args.host) or args.resume)
                     dns_matches(host, ip)
                     print(json.dumps({'ok': True, 'public_ip': ip, 'host': host, 'ubuntu': '24.04',
-                                      'shared_host': shared_host, 'writes': False}))
+                                      'shared_host': shared_host, 'path_prefix': installation_prefix(ip, args.resume), 'writes': False}))
                 return
             # Only the two trusted installers share this lock. It is nonblocking:
             # another bootstrap/broker job returns a safe BUSY instead of racing
@@ -1746,7 +1872,7 @@ def main():
                 source = Path(__file__).resolve().parents[1]
                 files = package_files(source)
                 if not STATE.exists():
-                    initialize_state(ip, host, shared_host is True)
+                    initialize_state(ip, host, shared_host is True, installation_prefix(ip))
                 with installer_lock():
                     if args.resume and resume_ready():
                         return
@@ -1761,7 +1887,12 @@ def install_target(args):
     if args.resume and not saved:
         saved = read_json(STATE / 'bootstrap.json', {})
     ip = public_ip(args.public_ip) if args.public_ip else public_ip(saved['public_ip']) if saved.get('public_ip') else detect_ip()
-    host = host_name(args.host) if args.host else host_name(saved['host']) if saved.get('host') else ip
+    inherited = None
+    if not args.resume and not args.host:
+        peer = peer_installation(ip)
+        if peer and peer.get('path_prefix'):
+            inherited = peer.get('site_host') or peer.get('host')
+    host = host_name(args.host) if args.host else host_name(saved['host']) if saved.get('host') else host_name(inherited) if inherited else ip
     return ip, host
 
 
