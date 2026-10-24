@@ -116,8 +116,8 @@ function assertRuntimeConfiguration() {
     throw new Error("ADMIN_API_KEY must contain an independent random 32-byte hexadecimal secret.");
   }
   for (const key of ["TELEGRAM_ENABLED", "MAX_ENABLED", "HCAPTCHA_ENABLED", "GITREPOSTED_WORKERS_ENABLED"]) {
-    if (env[key] !== undefined && !["0", "1"].includes(env[key])) {
-      throw new Error(`${key} must be 0 or 1 when configured.`);
+    if ((jsonConfiguration(ENV_FILE_PATH) || env[key] !== undefined) && !["0", "1"].includes(env[key])) {
+      throw new Error(`${key} must be explicitly 0 or 1 in JSON configuration, or when configured in an env file.`);
     }
   }
   if (jsonConfiguration(ENV_FILE_PATH)) validateRuntimeUrls(env);
@@ -394,7 +394,31 @@ function readEnvFile(filePath = ENV_FILE_PATH) {
 }
 
 function writeEnvFile(nextEnv) {
-  writeRuntimeEnvironment(ENV_FILE_PATH, nextEnv);
+  try { writeRuntimeEnvironment(ENV_FILE_PATH, nextEnv); }
+  catch (error) {
+    if (error.configurationReplaced === true) {
+      // Rename succeeded but its directory fsync failed. The file already
+      // contains the new values: reconcile memory without claiming durability
+      // or retrying the write, especially after a credential rotation.
+      let published;
+      try { published = readEnvFile(); }
+      catch {
+        env.ADMIN_API_KEY = "";
+        env.ADMIN_PASSWORD_HASH = "";
+        adminSessions.clear();
+        throw error;
+      }
+      const authChanged = ["ADMIN_API_KEY", "ADMIN_PASSWORD_HASH", "ADMIN_USERNAME"]
+        .some((key) => String(published[key] ?? "") !== String(env[key] ?? ""));
+      for (const key of new Set([...Object.keys(env), ...Object.keys(published)])) {
+        if (RESTART_CONFIG_KEYS.includes(key)) continue;
+        if (Object.hasOwn(published, key)) env[key] = published[key];
+        else delete env[key];
+      }
+      if (authChanged) adminSessions.clear();
+    }
+    throw error;
+  }
 }
 
 function maskSecret(value) {

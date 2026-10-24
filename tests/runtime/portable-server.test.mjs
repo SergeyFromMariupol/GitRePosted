@@ -13,12 +13,9 @@ const passwordHash = "scrypt$16384$8$1$00000000000000000000000000000000$1004ee38
 
 function fixture() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gitreposted-server-"));
-  // Copy explicit reviewed runtime targets, never arbitrary installed state.
-  for (const file of ["server.js", "src/account-routing.js", "src/bot-ui.js", "src/config.js", "src/link-format.js", "src/multipart-stream.js", "src/portable-runtime.js", "src/relay-idempotency.js", "src/relay-media.js", "src/relay-retry.js", "src/relay-temp-file.js", "src/request-ip.js", "src/runtime-secrets.js", "src/security-state.js", "public/index.html", "public/app.js", "public/app.css", "public/landing.html", "public/landing.css", "public/landing-strict.css", "public/assets/telegram.png", "public/assets/reposted-logo.png", "public/assets/max.png"]) {
-    const target = path.join(directory, file);
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.copyFileSync(path.join(application, file), target);
-  }
+  fs.copyFileSync(path.join(application, "server.js"), path.join(directory, "server.js"));
+  fs.cpSync(path.join(application, "src"), path.join(directory, "src"), { recursive: true });
+  fs.cpSync(path.join(application, "public"), path.join(directory, "public"), { recursive: true });
   fs.writeFileSync(path.join(directory, "package.json"), '{"type":"module"}');
   const driver = path.join(directory, "node_modules", "mysql2");
   fs.mkdirSync(driver, { recursive: true });
@@ -52,6 +49,21 @@ export default {createPool(){return {execute,async getConnection(){return connec
 import fs from 'node:fs'; import http from 'node:http';
 globalThis.fetch=async()=>{fs.appendFileSync(process.env.TEST_LEDGER,'PROVIDER_FORBIDDEN\\n');throw new Error('PROVIDER_FORBIDDEN');};
 globalThis.setInterval=()=>{throw new Error('WORKER_TIMER_FORBIDDEN');};
+const rename=fs.renameSync;
+const read=fs.readFileSync;let denyConfigurationRead=false;
+fs.readFileSync=function(name,...args){
+ if(denyConfigurationRead&&name===process.env.GITREPOSTED_ENV_FILE)throw new Error('private disk read fault');
+ return read.call(fs,name,...args);
+};
+fs.renameSync=function(from,to){
+ rename.call(fs,from,to);
+ if(process.env.TEST_CONFIG_DURABILITY_FAILURE==='1'&&to===process.env.GITREPOSTED_ENV_FILE){
+  fs.appendFileSync(process.env.TEST_LEDGER,'CONFIG_REPLACED\\n');
+  denyConfigurationRead=process.env.TEST_CONFIG_RECONCILE_READ_FAILURE==='1';
+  const error=new Error('Configuration was replaced, but directory durability was not confirmed. Reload the saved configuration before retrying.');
+  error.code='CONFIG_DURABILITY_UNCONFIRMED';error.statusCode=503;error.configurationReplaced=true;throw error;
+ }
+};
 const original=http.Server.prototype.listen;
 http.Server.prototype.listen=function(...args){if(process.env.TEST_FORBID_LISTEN==='1')throw new Error('HTTP_FORBIDDEN');this.once('listening',()=>console.log('READY:'+this.address().port));return original.apply(this,args);};
 `);
@@ -149,6 +161,29 @@ test("JSON startup rejects missing password hash, invalid switches and enabled p
   } finally { fs.rmSync(data.directory, { recursive: true }); }
 });
 
+test("JSON startup rejects each missing activation flag before schema, HTTP, workers or providers", async () => {
+  const data = fixture();
+  try {
+    // Legacy env defaults remain supported; portable JSON must record the
+    // operator's decisions explicitly rather than defaulting to active workers.
+    for (const key of ["TELEGRAM_ENABLED", "MAX_ENABLED", "HCAPTCHA_ENABLED", "GITREPOSTED_WORKERS_ENABLED"]) {
+      const values = { ...data.config, MAX_BOT_TOKEN: "fixture-only-max-token",
+        MAX_WEBHOOK_SECRET: "fixture_only_max_webhook_secret" };
+      delete values[key];
+      fs.writeFileSync(data.configPath, JSON.stringify(values));
+      await assert.rejects(executeFile(process.execPath, ["--import", "./guard.mjs", "server.js", "--verify-schema"], {
+        cwd: data.directory, env: { ...data.environment, TEST_READ_ONLY: "1", TEST_FORBID_LISTEN: "1" }
+      }), (error) => error.code === 1 && JSON.parse(error.stderr).ok === false && !error.stdout);
+      await assert.rejects(executeFile(process.execPath, ["--import", "./guard.mjs", "server.js"], {
+        cwd: data.directory, env: { ...data.environment, TEST_READ_ONLY: "1", TEST_FORBID_LISTEN: "1" }
+      }), (error) => error.code === 1 && error.stderr.includes(`${key} must be explicitly 0 or 1`)
+        && !/WORKER_TIMER_FORBIDDEN|HTTP_FORBIDDEN|PROVIDER_FORBIDDEN|MUTATION_FORBIDDEN/.test(error.stderr));
+    }
+    // CLI closes the unconnected pool; a normal failed startup never queries it.
+    assert.equal(fs.readFileSync(data.ledgerPath, "utf8"), "POOL_END\n".repeat(4));
+  } finally { fs.rmSync(data.directory, { recursive: true }); }
+});
+
 test("captured real HTTP handlers authenticate, rotate credentials atomically, and durably enqueue with workers paused", async () => {
   const data = fixture();
   let child;
@@ -198,7 +233,7 @@ test("bots can be enabled later from none, Telegram-only and MAX-only without ac
     const data = fixture();
     let child;
     try {
-      const validTelegramToken = "123456789" + ":" + "abcdefghijklmnopqrstuvwxyzABCDE123456789";
+      const validTelegramToken = ["123456789", "abcdefghijklmnopqrstuvwxyzABCDE123456789"].join(":");
       data.config.TELEGRAM_ENABLED = telegram ? "1" : "0";
       data.config.MAX_ENABLED = max ? "1" : "0";
       data.config.TELEGRAM_BOT_TOKEN = telegram ? validTelegramToken : "";
@@ -246,6 +281,56 @@ test("bots can be enabled later from none, Telegram-only and MAX-only without ac
         assert.equal((await response.json()).queued, true);
       }
       assert.doesNotMatch(fs.readFileSync(data.ledgerPath, "utf8"), /PROVIDER_FORBIDDEN|SET state = 'processing'/);
+    } finally {
+      await stopCapturedServer(child);
+      fs.rmSync(data.directory, { recursive: true });
+    }
+  }
+});
+
+test("ambiguous configuration persistence reconciles saved values and revokes rotated credentials without another write", async () => {
+  for (const mode of ["config", "rotation", "unreadable-rotation"]) {
+    const rotation = mode !== "config";
+    const data = fixture();
+    let child;
+    try {
+      data.environment.TEST_CONFIG_DURABILITY_FAILURE = "1";
+      if (mode === "unreadable-rotation") data.environment.TEST_CONFIG_RECONCILE_READ_FAILURE = "1";
+      const server = await startCapturedServer(data);
+      child = server.child;
+      const { request } = server;
+      const login = await request("/api/login", { username: "operator", password: "correct horse battery staple" });
+      assert.equal(login.status, 200);
+      const cookie = login.headers.get("set-cookie").split(";")[0];
+      const bearer = { authorization: `Bearer ${data.config.ADMIN_API_KEY}` };
+      const result = rotation
+        ? await request("/api/change-password", { current_password: "correct horse battery staple",
+          new_password: "new ambiguous write password", confirm_password: "new ambiguous write password" }, { cookie })
+        : await request("/api/config", { public_base_url: "https://new.example.test" }, { cookie });
+      assert.equal(result.status, 503);
+      const response = await result.json();
+      assert.match(response.message, /replaced.*Reload/);
+      assert.equal(result.headers.get("set-cookie"), null);
+      const saved = JSON.parse(fs.readFileSync(data.configPath, "utf8"));
+      if (rotation) {
+        assert.notEqual(saved.ADMIN_API_KEY, data.config.ADMIN_API_KEY);
+        assert.notEqual(saved.ADMIN_PASSWORD_HASH, data.config.ADMIN_PASSWORD_HASH);
+        assert.equal((await request("/api/session", undefined, { cookie })).status, 401);
+        assert.equal((await request("/api/session", undefined, bearer)).status, 401);
+        assert.equal((await request("/api/login", { username: "operator", password: "correct horse battery staple" })).status, 401);
+        assert.equal((await request("/api/login", { username: "operator", password: "new ambiguous write password" })).status,
+          mode === "unreadable-rotation" ? 401 : 200);
+      } else {
+        assert.equal(saved.PUBLIC_BASE_URL, "https://new.example.test");
+        const state = await request("/api/config", undefined, { cookie });
+        assert.equal(state.status, 200);
+        assert.equal((await state.json()).config.public_base_url, saved.PUBLIC_BASE_URL);
+      }
+      assert.doesNotMatch(JSON.stringify(response), /correct horse|new ambiguous write password/);
+      assert.ok(!fs.readdirSync(data.directory).some(name => name.includes(".tmp-")));
+      const ledger = fs.readFileSync(data.ledgerPath, "utf8");
+      assert.doesNotMatch(ledger, /PROVIDER_FORBIDDEN|SET state = 'processing'/);
+      assert.equal((ledger.match(/CONFIG_REPLACED\n/g) || []).length, 1);
     } finally {
       await stopCapturedServer(child);
       fs.rmSync(data.directory, { recursive: true });

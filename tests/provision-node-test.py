@@ -140,6 +140,8 @@ class NodeProvisionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); source = self.package(root)
             def system(argv, **kwargs):
+                if '-e' in argv:
+                    return b''  # Captured application-UID module probe, never real dependencies.
                 stage = Path(argv[argv.index('--prefix') + 1])
                 target = stage / 'node_modules/mysql2/promise.js'; target.parent.mkdir(parents=True); target.write_text('fixture-mysql2')
                 self.assertFalse((source / 'node_modules').exists())
@@ -149,7 +151,9 @@ class NodeProvisionTests(unittest.TestCase):
                  mock.patch.object(p, 'sync_directory'), mock.patch.object(p, 'seal_dependencies') as seal, mock.patch.object(p, 'run', side_effect=system) as run:
                 p.prepare_dependencies(root)
                 p.prepare_dependencies(root)
-                run.assert_called_once(); seal.assert_called_once()
+                self.assertEqual(1, sum('--prefix' in call.args[0] for call in run.call_args_list))
+                self.assertEqual(2, sum('-e' in call.args[0] for call in run.call_args_list))
+                self.assertEqual(2, seal.call_count)
             checkpoint = p.read_json(source / 'node_modules/.gitreposted-install.json')
             self.assertEqual(hashlib.sha256((source / 'package-lock.json').read_bytes()).hexdigest(), checkpoint['lock_sha256'])
             self.assertEqual(p.NODE_VERSION, checkpoint['node'])
@@ -168,6 +172,118 @@ class NodeProvisionTests(unittest.TestCase):
         self.assertNotIn('/etc/php/8.3/fpm/pool.d/gitreposted.conf', writes)
         self.assertIn('User=gitreposted-setup\n', writes['/etc/systemd/system/gitreposted-rate-limit-cleanup.service'])
         self.assertFalse(any('gitreposted-bridge.service' in call.args[0] for call in run.call_args_list))
+
+    def test_cached_checkpoint_cannot_hide_missing_empty_or_broken_dependencies(self):
+        for kind in ('missing', 'empty', 'broken'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); source = self.package(root); target = source / 'node_modules'; target.mkdir()
+                checkpoint = {'lock_sha256': hashlib.sha256((source / 'package-lock.json').read_bytes()).hexdigest(), 'node': p.NODE_VERSION}
+                (target / '.gitreposted-install.json').write_text(json.dumps(checkpoint))
+                entry = target / 'mysql2/promise.js'
+                if kind != 'missing':
+                    entry.parent.mkdir(); entry.write_bytes(b'' if kind == 'empty' else b'broken fixture dependency')
+                before = {path.relative_to(target): path.read_bytes() for path in target.rglob('*') if path.is_file()}
+                with mock.patch.object(p, 'validate_source'), mock.patch.object(p, 'seal_dependencies') as seal, \
+                     mock.patch.object(p, 'run', side_effect=p.Failure('SYSTEM_COMMAND_FAILED', 'Captured invalid module')) as run:
+                    with self.assertRaises(p.Failure) as error: p.prepare_dependencies(root)
+                self.assertEqual('INVALID_DEPENDENCIES', error.exception.code)
+                self.assertEqual(before, {path.relative_to(target): path.read_bytes() for path in target.rglob('*') if path.is_file()})
+                seal.assert_not_called()
+                self.assertEqual(1 if kind == 'broken' else 0, run.call_count)
+                if kind == 'broken':
+                    argv = run.call_args.args[0]
+                    self.assertEqual(['runuser', '-u', p.APP_USER, '--', p.NODE, '-e'], argv[:6])
+                    self.assertEqual(entry, argv[-1]); self.assertNotIn('createConnection(', argv[-2])
+                    self.assertEqual(source, run.call_args.kwargs['cwd'])
+
+    def test_malformed_existing_dependency_marker_is_refused_without_removing_files(self):
+        for contents in ('{not valid json', 'null', '{}'):
+            with self.subTest(marker=contents), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); source = self.package(root); target = source / 'node_modules'; target.mkdir()
+                marker = target / '.gitreposted-install.json'; marker.write_text(contents)
+                keep = target / 'unrelated-fixture'; keep.write_text('preserve')
+                with mock.patch.object(p, 'validate_source'), mock.patch.object(p, 'run') as run, self.assertRaises(p.Failure) as error:
+                    p.prepare_dependencies(root)
+                self.assertEqual('INVALID_DEPENDENCIES', error.exception.code); run.assert_not_called()
+                self.assertEqual(contents, marker.read_text()); self.assertEqual('preserve', keep.read_text())
+
+    def test_failed_fresh_app_uid_probe_never_publishes_dependency_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); source = self.package(root)
+            def system(argv, **kwargs):
+                if '-e' in argv:
+                    raise p.Failure('SYSTEM_COMMAND_FAILED', 'Captured invalid module')
+                stage = Path(argv[argv.index('--prefix') + 1])
+                entry = stage / 'node_modules/mysql2/promise.js'; entry.parent.mkdir(parents=True); entry.write_text('broken fixture')
+                return b''
+            with mock.patch.object(p, 'validate_source'), mock.patch.object(p, 'identity', return_value=(1001, 1001)), \
+                 mock.patch.object(p.os, 'chown', create=True), mock.patch.object(p, 'seal_dependencies'), \
+                 mock.patch.object(p, 'atomic', side_effect=lambda path, value, *_: Path(path).write_bytes(value.encode() if isinstance(value, str) else value)), \
+                 mock.patch.object(p, 'run', side_effect=system):
+                with self.assertRaises(p.Failure) as error: p.prepare_dependencies(root)
+            self.assertEqual('INVALID_DEPENDENCIES', error.exception.code)
+            self.assertFalse((source / 'node_modules').exists()); self.assertEqual([source], list(root.iterdir()))
+
+    @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0 and shutil.which('runuser'), 'Linux root real app-UID dependency probe')
+    def test_app_uid_dependency_probe_uses_public_source_instead_of_private_loader_cwd(self):
+        import pwd
+        try: account = pwd.getpwnam(p.APP_USER)
+        except KeyError: self.skipTest('Installer application user is not created yet')
+        if not p.NODE.is_file(): self.skipTest('Pinned installer Node is unavailable')
+        with tempfile.TemporaryDirectory(prefix='gitreposted-dependency-cwd.', dir='/var/tmp') as temporary:
+            root = Path(temporary); root.chmod(0o755)
+            private = root / 'private-loader'; private.mkdir(mode=0o700); private.chmod(0o700)
+            (private / 'package.json').write_text('{"fixture":"private caller scope"}')
+            source = root / 'public-src'; source.mkdir(mode=0o755); source.chmod(0o755)
+            package = source / 'node_modules/mysql2'; package.mkdir(parents=True, mode=0o755)
+            (source / 'node_modules').chmod(0o755); package.chmod(0o755)
+            (package / 'package.json').write_text('{"type":"commonjs"}')
+            entry = package / 'promise.js'
+            entry.write_text('if(process.getuid()!==' + str(account.pw_uid) + '||process.cwd()!==' + json.dumps(str(source)) + ')throw Error("fixture wrong identity or cwd");'
+                             'module.exports={createConnection(){throw Error("fixture must never connect")},createPool(){throw Error("fixture must never connect")}};')
+            for path in (package / 'package.json', entry): path.chmod(0o644)
+            previous = Path.cwd()
+            try:
+                os.chdir(private)
+                # Confirm that the caller really is inaccessible to the app UID;
+                # Node's -e startup probes its cwd package scope before loading.
+                with self.assertRaises(p.Failure):
+                    p.run(['runuser', '-u', p.APP_USER, '--', p.NODE, '-e', 'require(process.argv[1]);', entry], timeout=10)
+                p.verify_dependencies(source)
+                self.assertEqual(private, Path.cwd(), 'The parent process cwd must not change')
+            finally:
+                os.chdir(previous)
+
+    @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0, 'Linux root/no-follow durability regression')
+    def test_dependency_and_vendor_files_flush_before_their_parent_directories(self):
+        for vendor in (False, True):
+            with self.subTest(vendor=vendor), tempfile.TemporaryDirectory(prefix='gitreposted-durable-tree.', dir='/var/tmp') as temporary:
+                root = Path(temporary); nested = root / 'nested'; nested.mkdir(); entry = nested / 'entry.js'; entry.write_text('fixture bytes')
+                (root / 'other.js').write_text('other fixture bytes')
+                original = os.fsync; flushed = []
+                def flush(descriptor):
+                    path = Path(os.readlink('/proc/self/fd/' + str(descriptor)))
+                    flushed.append(path); original(descriptor)
+                with mock.patch.object(p.os, 'fsync', side_effect=flush):
+                    p.normalize_node_tree(root) if vendor else p.seal_dependencies(root)
+                self.assertEqual({root, nested, entry, root / 'other.js'}, set(flushed))
+                self.assertLess(flushed.index(entry), flushed.index(nested)); self.assertLess(flushed.index(nested), flushed.index(root))
+                self.assertEqual('fixture bytes', entry.read_text())
+
+    @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0, 'Linux root vendor checkpoint durability')
+    def test_vendor_fsync_failure_cannot_publish_marker_or_completed_release(self):
+        with tempfile.TemporaryDirectory(prefix='gitreposted-vendor-flush.', dir='/var/tmp') as temporary:
+            root = Path(temporary); archive = root / 'vendor.tar.xz'; prefix, _ = p.node_archive()
+            self.archive(archive, [(prefix + '/bin/node', 'executable', 'fixture node')])
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest(); node_root = root / 'node'
+            def system(argv, **kwargs):
+                self.assertEqual('curl', argv[0]); shutil.copyfile(archive, argv[argv.index('--output') + 1]); return b''
+            with mock.patch.object(p, 'NODE_ROOT', node_root), mock.patch.object(p, 'node_archive', return_value=(prefix, digest)), \
+                 mock.patch.object(p, 'run', side_effect=system), mock.patch.object(p.os, 'fsync', side_effect=OSError('fixture private storage failure')):
+                with self.assertRaises(p.Failure) as error: p.prepare_node()
+            self.assertEqual('NODE_UNAVAILABLE', error.exception.code); self.assertNotIn('private storage', str(error.exception))
+            self.assertFalse((node_root / prefix).exists()); self.assertFalse((node_root / 'current').exists())
+            self.assertEqual([], list(node_root.iterdir()))
 
     def test_stage_cleanup_refuses_parent_and_noncanonical_target(self):
         with tempfile.TemporaryDirectory() as temporary:

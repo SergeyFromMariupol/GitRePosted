@@ -333,22 +333,17 @@ final class InstallerApplication
     {
         if ($platform === 'max') {
             $expected = [['name'=>'start','description'=>'Открыть главное меню']];
-            $result = $this->api($platform, $token, 'PATCH', '/me/commands', ['commands' => $expected], $config);
-            $actual = $result['commands'] ?? null;
-            if (!is_array($actual) || !array_is_list($actual)) {
-                throw new InstallerApplicationFailure('COMMANDS_NOT_CONFIRMED', 'МАКС не подтвердил меню команд. Продолжите настройку бота.');
+            $current = $this->api($platform, $token, 'GET', '/me', [], $config);
+            if ($this->maxStartCommandMatches($current['commands'] ?? null)) return;
+            try {
+                // The PATCH response's commands field is optional. A lost
+                // response can also follow an applied update: read the state.
+                $this->api($platform, $token, 'PATCH', '/me/commands', ['commands' => $expected], $config);
+            } catch (InstallerApplicationFailure) {
+                // Never repeat a mutation here; confirm through GET /me.
             }
-            $normalized = [];
-            foreach ($actual as $command) {
-                if (!is_array($command) || !is_string($command['name'] ?? null) || !is_string($command['description'] ?? null)) {
-                    throw new InstallerApplicationFailure('COMMANDS_NOT_CONFIRMED', 'МАКС не подтвердил меню команд. Продолжите настройку бота.');
-                }
-                $normalized[] = ['name' => ltrim(trim($command['name']), '/'), 'description' => trim($command['description'])];
-            }
-            $sort = static fn(array $left, array $right): int => [$left['name'], $left['description']] <=> [$right['name'], $right['description']];
-            usort($expected, $sort);
-            usort($normalized, $sort);
-            if ($normalized !== $expected) {
+            $confirmed = $this->api($platform, $token, 'GET', '/me', [], $config);
+            if (!$this->maxStartCommandMatches($confirmed['commands'] ?? null)) {
                 throw new InstallerApplicationFailure('COMMANDS_NOT_CONFIRMED', 'МАКС не подтвердил меню команд. Продолжите настройку бота.');
             }
             return;
@@ -365,6 +360,14 @@ final class InstallerApplication
         if (($result['result'] ?? null) !== true) {
             throw new InstallerApplicationFailure('COMMANDS_NOT_CONFIRMED', 'Telegram не подтвердил кнопку меню. Продолжите настройку бота.');
         }
+    }
+
+    private function maxStartCommandMatches(mixed $commands): bool
+    {
+        if (!is_array($commands) || !array_is_list($commands) || count($commands) !== 1) return false;
+        $command = $commands[0];
+        return is_array($command) && is_string($command['name'] ?? null) && is_string($command['description'] ?? null)
+            && ltrim(trim($command['name']), '/') === 'start' && trim($command['description']) === 'Открыть главное меню';
     }
 
     private function verify(array $input): array

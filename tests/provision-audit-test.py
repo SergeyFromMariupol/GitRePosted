@@ -466,6 +466,128 @@ class ProvisionAuditTests(unittest.TestCase):
             self.assertEqual([marker], list(outside.iterdir()))
             self.assertEqual(b'preserve fixture', marker.read_bytes())
 
+    def test_package_resume_configures_pending_before_bounded_no_remove_install(self):
+        for resume in (False, True):
+            with self.subTest(resume=resume), patch.object(p, 'wait_package_locks') as wait, patch.object(p, 'run', return_value=b'') as run:
+                p.prepare_system_packages(resume)
+                commands = [call.args[0] for call in run.call_args_list]
+                self.assertEqual(1 if resume else 0, wait.call_count)
+                self.assertEqual(3 if resume else 2, len(commands))
+                if resume:
+                    self.assertEqual(['dpkg', '--force-confdef', '--force-confold', '--configure', '--pending'], commands[0])
+                for argv in commands[-2:]:
+                    self.assertIn('DPkg::Lock::Timeout=120', argv)
+                    self.assertIn('Dpkg::Options::=--force-confold', argv)
+                self.assertIn('--no-remove', commands[-1]); self.assertNotIn('--fix-broken', commands[-1])
+                self.assertEqual('apt-get', commands[-1][0]); self.assertIn('mysql-server', commands[-1])
+
+    def test_package_repair_is_bounded_and_only_normal_configuration_failure_can_reach_apt(self):
+        for returncode in (1, 2, None):
+            with self.subTest(returncode=returncode):
+                error = p.Failure('SYSTEM_COMMAND_FAILED', 'Captured safe failure')
+                if returncode is not None: error.command_returncode = returncode
+                calls = []
+                def run(argv, **kwargs):
+                    calls.append(argv)
+                    if argv[0] == 'dpkg': raise error
+                    return b''
+                with patch.object(p, 'wait_package_locks'), patch.object(p, 'run', side_effect=run):
+                    if returncode == 1:
+                        p.prepare_system_packages(True)
+                        self.assertEqual(3, len(calls)); self.assertIn('--fix-broken', calls[-1]); self.assertIn('--no-remove', calls[-1])
+                    else:
+                        with self.assertRaises(p.Failure) as caught: p.prepare_system_packages(True)
+                        self.assertEqual('PACKAGE_CONFIGURATION_FAILED', caught.exception.code); self.assertEqual(1, len(calls))
+
+    @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0, 'Linux root actual POSIX package lock')
+    def test_package_lock_wait_respects_live_owner_and_never_deletes_lock_files(self):
+        with tempfile.TemporaryDirectory(prefix='gitreposted-package-lock.', dir='/var/tmp') as temporary:
+            root = Path(temporary); lock = root / 'lock'; lock.write_bytes(b'preserve lock inode')
+            inode = lock.stat().st_ino
+            ready_read, ready_write = os.pipe(); release_read, release_write = os.pipe()
+            child = os.fork()
+            if child == 0:
+                os.close(ready_read); os.close(release_write)
+                try:
+                    descriptor = os.open(lock, os.O_RDWR)
+                    p.fcntl.lockf(descriptor, p.fcntl.LOCK_EX)
+                    os.write(ready_write, b'1'); os.read(release_read, 1)
+                    os.close(descriptor); os._exit(0)
+                except BaseException: os._exit(1)
+            os.close(ready_write); os.close(release_read)
+            try:
+                self.assertEqual(b'1', os.read(ready_read, 1))
+                with patch.object(p, 'PACKAGE_LOCKS', (lock, root / 'absent')):
+                    with self.assertRaises(p.Failure) as error: p.wait_package_locks(timeout=0)
+                    self.assertEqual('PACKAGE_MANAGER_BUSY', error.exception.code)
+                    os.write(release_write, b'1'); _, status = os.waitpid(child, 0); child = None
+                    self.assertEqual(0, os.waitstatus_to_exitcode(status)); p.wait_package_locks(timeout=1)
+                self.assertEqual(inode, lock.stat().st_ino); self.assertEqual(b'preserve lock inode', lock.read_bytes())
+                self.assertFalse((root / 'absent').exists())
+            finally:
+                if child is not None:
+                    try: os.write(release_write, b'1')
+                    except BrokenPipeError: pass
+                    os.waitpid(child, 0)
+                os.close(ready_read); os.close(release_write)
+
+    @contextlib.contextmanager
+    def release_selection(self):
+        with tempfile.TemporaryDirectory(prefix='gitreposted-select-release.', dir='/var/tmp') as temporary:
+            root = Path(temporary); app = root / 'app'; state = root / 'state'; state.mkdir()
+            old, new = app / 'releases/0.0.1-rc.1', app / 'releases' / p.VERSION
+            for release, prefix in ((old, 'old'), (new, 'new')):
+                source = release / 'src'; source.mkdir(parents=True)
+                for name in ('server.js', 'package.json', 'package-lock.json'): (source / name).write_text(prefix + ' fixture bytes')
+            (app / 'current').symlink_to(old)
+            (state / 'public.json').write_text('{"tls_ready":false,"installed":false}')
+            (state / 'private.json').write_text('{}')
+            with patch.object(p, 'APP', app), patch.object(p, 'STATE', state), patch.object(p, 'CONFIG', root / 'config.json'):
+                yield root, old, new
+
+    @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0, 'Linux root pre-wizard cross-release resume')
+    def test_early_resume_can_select_new_complete_release_and_preserves_previous(self):
+        with self.release_selection() as (root, old, new), patch.object(p, 'run', return_value=b'') as run:
+            before = (old / 'src/server.js').read_bytes()
+            p.select_application_release(new, resume=True)
+            self.assertEqual(new, (p.APP / 'current').resolve()); self.assertEqual(before, (old / 'src/server.js').read_bytes())
+            self.assertEqual([p.APP / 'current', p.APP / 'releases'], sorted(p.APP.iterdir()))
+            self.assertEqual(['systemctl', 'list-units'], run.call_args.args[0][:2])
+            run.reset_mock(); p.select_application_release(new, resume=True); run.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0, 'Linux root configured-release guards')
+    def test_cross_release_resume_refuses_configured_or_started_wizard_and_unrequested_upgrade(self):
+        for case in ('fresh', 'tls', 'settings', 'job', 'config', 'installed'):
+            with self.subTest(case=case), self.release_selection() as (root, old, new), patch.object(p, 'run') as run:
+                if case == 'tls': (p.STATE / 'public.json').write_text('{"tls_ready":true}')
+                elif case in ('settings', 'job'): (p.STATE / 'private.json').write_text(json.dumps({case: {'fixture': True}}))
+                elif case == 'config': p.CONFIG.write_text('preserve existing config')
+                elif case == 'installed': (p.STATE / 'installed.json').write_text('{}')
+                with self.assertRaises(p.Failure): p.select_application_release(new, resume=case != 'fresh')
+                self.assertEqual(old, (p.APP / 'current').resolve()); run.assert_not_called()
+                if case == 'config': self.assertEqual('preserve existing config', p.CONFIG.read_text())
+
+    @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0, 'Linux root canonical-release and live-process guards')
+    def test_cross_release_resume_rejects_foreign_target_and_running_bridge(self):
+        for case in ('foreign', 'active'):
+            with self.subTest(case=case), self.release_selection() as (root, old, new), patch.object(p, 'run', return_value=b'gitreposted-bridge.service loaded active running fixture') as run:
+                selected = old
+                if case == 'foreign':
+                    selected = root / 'foreign'; selected.mkdir(); (p.APP / 'current').unlink(); (p.APP / 'current').symlink_to(selected)
+                with self.assertRaises(p.Failure): p.select_application_release(new, resume=True)
+                self.assertEqual(selected, (p.APP / 'current').resolve())
+                self.assertEqual(0 if case == 'foreign' else 1, run.call_count)
+
+    @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0, 'Linux root atomic release selection failure')
+    def test_failed_release_selection_preserves_previous_link_and_removes_only_own_temporary(self):
+        with self.release_selection() as (root, old, new), patch.object(p, 'run', return_value=b''), \
+             patch.object(p.os, 'replace', side_effect=OSError('Captured atomic rename failure')):
+            with self.assertRaises(p.Failure) as error: p.select_application_release(new, resume=True)
+            self.assertEqual('RELEASE_UNAVAILABLE', error.exception.code)
+            self.assertNotIn('Captured', str(error.exception))
+            self.assertEqual(old, (p.APP / 'current').resolve())
+            self.assertEqual([p.APP / 'current', p.APP / 'releases'], sorted(p.APP.iterdir()))
+
 
 
 

@@ -15,8 +15,8 @@ async function fixture(mode) {
     const page = await context.newPage(), calls = [], errors = [];
     const state = { authenticated: true, secure: true, installed: false, csrf: 'a'.repeat(64),
         base_url: 'https://fixture.example', host: 'fixture.example', site_url: 'https://fixture.example',
-        site_host: 'fixture.example', public_ip: '8.8.8.8', job: mode === 'revise-denied'
-            ? { id: 'original-job', status: 'failed', type: 'install', can_revise: true, steps: [], error: 'Old provider error' }
+        site_host: 'fixture.example', public_ip: '8.8.8.8', job: mode.startsWith('revise-') || mode === 'host-lost'
+            ? { id: 'original-job', status: 'failed', type: mode === 'host-lost' ? 'host' : 'install', can_revise: true, steps: [], error: 'Old provider error' }
             : { status: 'idle', type: 'install', steps: [] } };
     page.on('pageerror', e => errors.push(e.message));
     await context.route('**/*', async route => {
@@ -28,10 +28,21 @@ async function fixture(mode) {
                     error: { code: 'INVALID_SETTINGS', message: 'Captured settings validation failure.' } }) });return;
             }
             if (action === 'revise') {
+                if (mode === 'revise-lost') { await route.abort('connectionreset');return; }
+                if (['revise-unavailable', 'revise-fast-failed', 'revise-fast-locked', 'revise-running'].includes(mode)) {
+                    if (mode !== 'revise-unavailable') state.job = { id: 'original-job', type: 'install',
+                        status: mode === 'revise-running' ? 'running' : 'failed', can_revise: mode !== 'revise-fast-locked',
+                        steps: [{ id: mode === 'revise-fast-locked' ? 'activate' : 'config', title: 'Revised configuration',
+                            status: mode === 'revise-running' ? 'running' : 'failed' }],
+                        error: mode === 'revise-fast-locked' ? 'Activation needs retry.' : 'Revised configuration failed.' };
+                    await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ ok: false,
+                        error: { code: 'UNAVAILABLE', message: 'Captured reply failure.' } }) });return;
+                }
                 assert.equal(mode, 'revise-denied');
                 await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ ok: false,
                     error: { code: 'REGISTERED_BOT_CHANGE_DENIED', message: 'Keep the registered bot enabled and use its token.' } }) });return;
             }
+            if (mode === 'host-lost' && action === 'host') { await route.abort('connectionreset');return; }
             if (action === 'start') {
                 if (mode === 'absent' && calls.filter(x => x === 'start').length === 1) { await route.abort('connectionreset');return; }
                 state.job = { id: 'original-job', type: 'install', status: 'running', steps: [{ id: 'schema', title: 'Schema', status: 'running' }] };
@@ -50,9 +61,10 @@ async function fixture(mode) {
         await route.fulfill({ contentType: relative.endsWith('.js') ? 'text/javascript' : relative.endsWith('.css') ? 'text/css' : 'text/html', body: fs.readFileSync(filename) });
     });
     await page.goto('https://fixture.example/install/');
-    if (mode === 'revise-denied') await page.locator('#job-edit').click();
+    if (mode.startsWith('revise-') || mode === 'host-lost') await page.locator('#job-edit').click();
     await page.locator('#wizard-screen').waitFor({ state: 'visible' });
-    if (mode !== 'revise-denied') await page.locator('#next-step').click();
+    if (mode === 'host-lost') return { page, calls, state, close: async () => { assert.deepEqual(errors, []);await context.close(); } };
+    if (!mode.startsWith('revise-')) await page.locator('#next-step').click();
     await page.locator('#admin-username').fill('operator');
     await page.locator('#admin-password').fill('fixture-new-password');
     await page.locator('#admin-password-confirm').fill('fixture-new-password');
@@ -99,6 +111,79 @@ test('rejected revision displays its new explanation and stops polling the uncha
         await f.page.waitForTimeout(4500);
         assert.equal(f.calls.filter(x => x === 'status').length, polls);
         assert.equal(f.calls.filter(x => x === 'revise').length, 1);
+        assert.equal(f.calls.includes('start'), false);
+    } finally { await f.close(); }
+});
+
+for (const mode of ['revise-lost', 'revise-unavailable', 'revise-fast-failed']) test(mode + ' reconciles a failed edited job without discarding fields or repeating the revision', async () => {
+    const f = await fixture(mode);
+    try {
+        await f.page.locator('#next-step').click();
+        await f.page.locator('#settings-error').waitFor({ state: 'visible', timeout: 4000 });
+        const message = await f.page.locator('#settings-error').innerText();
+        assert.match(message, mode === 'revise-fast-failed' ? /Revised configuration failed/ : /Old provider error/);
+        assert.match(message, /Ответ на запрос изменения не подтверждён/);
+        assert.doesNotMatch(message, /не сообщает о запущенном задании/);
+        assert.equal(await f.page.locator('#wizard-screen').isVisible(), true);
+        assert.equal(await f.page.locator('#job-screen').isVisible(), false);
+        assert.equal(await f.page.locator('#admin-password').inputValue(), 'fixture-new-password');
+        const polls = f.calls.filter(x => x === 'status').length;
+        await f.page.waitForTimeout(4500);
+        assert.equal(f.calls.filter(x => x === 'status').length, polls);
+        assert.equal(f.calls.filter(x => x === 'revise').length, 1);
+        assert.equal(f.calls.includes('start'), false);
+    } finally { await f.close(); }
+});
+
+test('an accepted revision which can no longer be edited shows its actual failure and existing-job retry', async () => {
+    const f = await fixture('revise-fast-locked');
+    try {
+        await f.page.locator('#next-step').click();
+        await f.page.waitForFunction(() => document.getElementById('job-error').textContent === 'Activation needs retry.', { timeout: 4000 });
+        assert.equal(await f.page.locator('#job-screen').isVisible(), true);
+        assert.equal(await f.page.locator('#wizard-screen').isVisible(), false);
+        assert.equal(await f.page.locator('#job-edit').isVisible(), false);
+        assert.equal(await f.page.locator('#job-retry').isVisible(), true);
+        const polls = f.calls.filter(x => x === 'status').length;
+        await f.page.waitForTimeout(4500);
+        assert.equal(f.calls.filter(x => x === 'status').length, polls);
+        assert.equal(f.calls.filter(x => x === 'revise').length, 1);
+        assert.equal(f.calls.includes('retry'), false);
+    } finally { await f.close(); }
+});
+
+test('a lost response after an accepted running revision keeps polling that job', async () => {
+    const f = await fixture('revise-running');
+    try {
+        await f.page.locator('#next-step').click();
+        await f.page.waitForFunction(() => document.getElementById('job-caption').textContent === 'Revised configuration', { timeout: 4000 });
+        assert.equal(await f.page.locator('#job-screen').isVisible(), true);
+        assert.equal(await f.page.locator('#wizard-screen').isVisible(), false);
+        const polls = f.calls.filter(x => x === 'status').length;
+        await f.page.waitForTimeout(3000);
+        assert.ok(f.calls.filter(x => x === 'status').length > polls);
+        assert.equal(f.calls.filter(x => x === 'revise').length, 1);
+    } finally { await f.close(); }
+});
+
+test('a lost domain-edit request restores the retained domain form instead of polling its previous failure', async () => {
+    const f = await fixture('host-lost');
+    try {
+        await f.page.locator('#domain-details summary').click();
+        await f.page.locator('#domain-host').fill('revised.example');
+        await f.page.locator('#domain-email').fill('operator@revised.example');
+        await f.page.locator('#host-submit').click();
+        await f.page.locator('#host-error').waitFor({ state: 'visible', timeout: 4000 });
+        assert.match(await f.page.locator('#host-error').innerText(), /Old provider error/);
+        assert.match(await f.page.locator('#host-error').innerText(), /Ответ на запрос изменения не подтверждён/);
+        assert.equal(await f.page.locator('#wizard-screen').isVisible(), true);
+        assert.equal(await f.page.locator('#job-screen').isVisible(), false);
+        assert.equal(await f.page.locator('#domain-host').inputValue(), 'revised.example');
+        assert.equal(await f.page.locator('#domain-email').inputValue(), 'operator@revised.example');
+        const polls = f.calls.filter(x => x === 'status').length;
+        await f.page.waitForTimeout(4500);
+        assert.equal(f.calls.filter(x => x === 'status').length, polls);
+        assert.equal(f.calls.filter(x => x === 'host').length, 1);
         assert.equal(f.calls.includes('start'), false);
     } finally { await f.close(); }
 });

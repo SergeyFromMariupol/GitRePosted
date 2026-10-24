@@ -44,7 +44,14 @@ export function writeRuntimeEnvironment(filePath, nextEnv) {
   const currentStat = fs.statSync(filePath);
   const temporaryPath = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
   let descriptor;
+  let directoryDescriptor;
   try {
+    // Ubuntu needs the directory entry persisted as well as the new file's
+    // bytes. Windows does not support opening/fsyncing a directory this way.
+    if (process.platform !== "win32") {
+      directoryDescriptor = fs.openSync(path.dirname(path.resolve(filePath)),
+        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    }
     descriptor = fs.openSync(temporaryPath, "wx", 0o600);
     fs.writeFileSync(descriptor, source, { encoding: "utf8" });
     if (typeof process.getuid === "function" && process.getuid() === 0) {
@@ -55,10 +62,22 @@ export function writeRuntimeEnvironment(filePath, nextEnv) {
     fs.closeSync(descriptor);
     descriptor = undefined;
     fs.renameSync(temporaryPath, filePath);
+    if (directoryDescriptor !== undefined) {
+      try { fs.fsyncSync(directoryDescriptor); }
+      catch {
+        const error = new Error("Configuration was replaced, but saving its directory to disk was not confirmed. Reload the saved configuration before retrying.");
+        error.code = "CONFIG_DURABILITY_UNCONFIRMED";
+        error.statusCode = 503;
+        error.configurationReplaced = true;
+        throw error;
+      }
+    }
   } catch (error) {
     if (descriptor !== undefined) fs.closeSync(descriptor);
     try { fs.unlinkSync(temporaryPath); } catch { /* Nothing remains after a successful rename. */ }
     throw error;
+  } finally {
+    if (directoryDescriptor !== undefined) fs.closeSync(directoryDescriptor);
   }
 }
 

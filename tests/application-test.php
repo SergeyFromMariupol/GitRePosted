@@ -6,7 +6,7 @@ function check(bool $ok,string $why='assertion failed'):void{if(!$ok)throw new R
 function group(string $name,callable $test):void{global $failures,$groups;++$groups;try{$test();echo "PASS $name\n";}catch(Throwable $e){++$failures;echo "FAIL $name: ".$e->getMessage()."\n";}}
 function app(object $fixture):InstallerApplication{return call_user_func($fixture->make);}
 function fixture():object{
- $f=(object)['calls'=>[],'tg'=>[],'max'=>[],'schema'=>[],'fail'=>false];
+ $f=(object)['calls'=>[],'tg'=>[],'max'=>[],'maxCommands'=>[],'schema'=>[],'fail'=>false];
  $f->config=['bot_token'=>'123456:'.str_repeat('a',32),'bot_username'=>'fixture_bot','telegram_bot_enabled'=>false,
   'max_bot_token'=>'fixture-max-token','max_bot_username'=>'fixture_max','max_bot_enabled'=>false,
   'base_url'=>'https://bridge.example','webhook_secret'=>str_repeat('b',64),'max_webhook_secret'=>str_repeat('c',64)];
@@ -14,13 +14,13 @@ function fixture():object{
   $f->calls[]=compact('platform','method','path','body','attempts');
   if($f->fail)throw new RuntimeException('private '.$token);
   if($path==='getMe')return ['ok'=>true,'result'=>['id'=>123456,'is_bot'=>true,'username'=>'fixture_bot']];
-  if($path==='/me')return ['user_id'=>77,'username'=>'fixture_max'];
+  if($path==='/me')return ['user_id'=>77,'username'=>'fixture_max','commands'=>$f->maxCommands];
   if($path==='getWebhookInfo')return ['ok'=>true,'result'=>$f->tg[0]??['url'=>'']];
   if($path==='/subscriptions'&&$method==='GET')return ['subscriptions'=>$f->max];
   if($path==='setWebhook'){$f->tg=[['url'=>$body['url'],'allowed_updates'=>$body['allowed_updates']]];return ['ok'=>true,'result'=>true];}
   if($path==='/subscriptions'&&$method==='POST'){$f->max[]=['url'=>$body['url'],'update_types'=>$body['update_types']];return ['success'=>true];}
   if($path==='/subscriptions'&&$method==='DELETE'){$f->max=array_values(array_filter($f->max,fn($row)=>$row['url']!==$body['url']));return ['success'=>true];}
-  if($path==='/me/commands')return ['commands'=>$body['commands']];
+  if($path==='/me/commands'){$f->maxCommands=$body['commands'];return ['commands'=>$f->maxCommands];}
   if(in_array($path,['setMyCommands','setChatMenuButton'],true))return ['ok'=>true,'result'=>true];
   throw new RuntimeException('unexpected provider call');
  };
@@ -34,6 +34,48 @@ group('admin only verification has no platform API effects',function(){$f=fixtur
 group('foreign webhook consent is mandatory before mutation',function(){foreach(['telegram','max'] as $platform){$f=fixture();$f->{$platform==='telegram'?'tg':'max'}=[['url'=>'https://other.example/private']];$result=app($f)->run(['action'=>'register','platform'=>$platform]);check(!$result['ok']&&$result['error']['code']==='TAKEOVER_REQUIRED');foreach($f->calls as $c)check(in_array($c['path'],['getMe','getWebhookInfo','/me','/subscriptions'],true)&&$c['method']!=='DELETE');}});
 group('Telegram registration preserves pending queue and exact event set',function(){$f=fixture();check(app($f)->run(['action'=>'register','platform'=>'telegram'])['ok']);$send=array_values(array_filter($f->calls,fn($c)=>$c['path']==='setWebhook'))[0];check($send['body']['url']==='https://bridge.example/webhooks/telegram');check($send['body']['drop_pending_updates']===false);check(in_array('edited_message',$send['body']['allowed_updates'],true));check(!in_array('chat_member',$send['body']['allowed_updates'],true));foreach($f->calls as $c)check($c['platform']==='telegram');});
 group('MAX confirms new subscription before removing approved old URL',function(){$f=fixture();$f->max=[['url'=>'https://old.example/hook','update_types'=>[]]];check(app($f)->run(['action'=>'register','platform'=>'max','takeover'=>true])['ok']);$paths=array_map(fn($c)=>$c['method'].' '.$c['path'],$f->calls);$post=array_search('POST /subscriptions',$paths,true);$delete=array_search('DELETE /subscriptions',$paths,true);check(is_int($post)&&is_int($delete)&&$post<$delete);check(in_array('GET /subscriptions',array_slice($paths,$post+1,$delete-$post-1),true));check(count($f->max)===1&&$f->max[0]['url']==='https://bridge.example/webhooks/max');});
+
+group('MAX menu uses readback when optional PATCH commands are absent or response is lost',function(){
+ foreach(['empty','lost'] as $mode){
+  $f=fixture();$original=$f->transport;
+  $f->transport=static function($platform,$token,$method,$path,$body,$attempts)use($original,$mode){
+   $result=$original($platform,$token,$method,$path,$body,$attempts);
+   if($path==='/me/commands'){if($mode==='lost')throw new RuntimeException('private response failure');return [];}
+   return $result;
+  };
+  check(app($f)->run(['action'=>'register','platform'=>'max'])['ok']);
+  $paths=array_map(fn($c)=>$c['method'].' '.$c['path'],$f->calls);$patch=array_search('PATCH /me/commands',$paths,true);
+  check(is_int($patch)&&in_array('GET /me',array_slice($paths,$patch+1),true));
+  check(count(array_filter($paths,fn($c)=>$c==='PATCH /me/commands'))===1);
+ }
+});
+
+group('MAX menu malformed or wrong readback never removes the old subscription',function(){
+ foreach(['malformed',[['name'=>'other','description'=>'Other']],[['name'=>'start','description'=>'Открыть главное меню'],['name'=>'start','description'=>'Открыть главное меню']]] as $actual){
+  $f=fixture();$f->max=[['url'=>'https://old.example/hook','update_types'=>[]]];$original=$f->transport;
+  $f->transport=static function($platform,$token,$method,$path,$body,$attempts)use($original,$actual){
+   $result=$original($platform,$token,$method,$path,$body,$attempts);if($path==='/me')$result['commands']=$actual;return $result;
+  };
+  $result=app($f)->run(['action'=>'register','platform'=>'max','takeover'=>true]);
+  check(!$result['ok']&&$result['error']['code']==='COMMANDS_NOT_CONFIRMED');
+  check(count(array_filter($f->calls,fn($c)=>$c['method']==='DELETE'))===0);
+  check(in_array('https://old.example/hook',array_column($f->max,'url'),true));
+ }
+});
+
+group('MAX retry skips confirmed menu after lost update and unavailable first readback',function(){
+ $f=fixture();$f->max=[['url'=>'https://old.example/hook','update_types'=>[]]];$original=$f->transport;$denyRead=false;
+ $f->transport=static function($platform,$token,$method,$path,$body,$attempts)use($original,&$denyRead){
+  if($path==='/me'&&$denyRead){$denyRead=false;throw new RuntimeException('temporary read failure');}
+  $result=$original($platform,$token,$method,$path,$body,$attempts);
+  if($path==='/me/commands'){$denyRead=true;throw new RuntimeException('lost applied update');}return $result;
+ };
+ check(!app($f)->run(['action'=>'register','platform'=>'max','takeover'=>true])['ok']);
+ check(count(array_filter($f->calls,fn($c)=>$c['method']==='DELETE'))===0);
+ check(app($f)->run(['action'=>'register','platform'=>'max','takeover'=>true])['ok']);
+ check(count(array_filter($f->calls,fn($c)=>$c['path']==='/me/commands'))===1);
+ check(!in_array('https://old.example/hook',array_column($f->max,'url'),true));
+});
 group('configured active workers prevent installer registration',function(){$f=fixture();$f->config['max_bot_enabled']=true;$result=app($f)->run(['action'=>'register','platform'=>'telegram']);check(!$result['ok']);check($f->calls===[]);});
 group('private foreign URL components and API errors never leak',function(){$f=fixture();$secret='private-fixture-marker';$f->tg=[['url'=>'https://old.example/'.$secret.'?key='.$secret]];$result=app($f)->run(['action'=>'check','platform'=>'telegram','token'=>$f->config['bot_token']]);check($result['ok']);check(!str_contains(json_encode($result),$secret));$f->fail=true;$result=app($f)->run(['action'=>'check','platform'=>'telegram','token'=>$f->config['bot_token']]);check(!$result['ok']&&!str_contains(json_encode($result),$f->config['bot_token']));});
 group('read-only installation state exposes only activation flags',function(){$f=fixture();$result=app($f)->run(['action'=>'installation_state']);check($result===['ok'=>true,'result'=>['configured'=>true,'telegram_enabled'=>false,'max_enabled'=>false]]);check($f->calls===[]&&$f->schema===[]);});

@@ -27,7 +27,7 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
-VERSION = '0.1.0-rc.3'
+VERSION = '0.1.0-rc.4'
 INSTALL = Path('/opt/gitreposted-installer')
 APP = Path('/opt/gitreposted')
 STATE = Path('/var/lib/gitreposted-installer')
@@ -42,6 +42,7 @@ SETUP_USER = 'gitreposted-setup'
 NODE_ROOT = Path('/opt/gitreposted-node')
 NODE = NODE_ROOT / 'current/bin/node'
 NODE_VERSION = '24.22.1'
+PACKAGE_LOCKS = (Path('/var/lib/dpkg/lock-frontend'), Path('/var/lib/dpkg/lock'))
 # Official release SHASUMS: https://nodejs.org/en/blog/release/v24.22.1
 NODE_ARCHIVES = {
     'x86_64': ('x64', '6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6'),
@@ -55,13 +56,14 @@ class Failure(Exception):
         self.code = code
 
 
-def run(argv, *, data=None, timeout=120, safe='Команда системы не выполнена.', capture=True):
+def run(argv, *, data=None, timeout=120, safe='Команда системы не выполнена.', capture=True, cwd=None):
     """Never include stdin, raw stderr or argv in raised errors."""
     child = None
     try:
         child = subprocess.Popen([str(x) for x in argv], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE if capture else None, stderr=subprocess.PIPE if capture else None,
                                  start_new_session=True,
+                                 cwd=cwd,
                                  env={**os.environ, 'DEBIAN_FRONTEND': 'noninteractive', 'LC_ALL': 'C.UTF-8'})
         try:
             output, _ = child.communicate(input=data, timeout=timeout)
@@ -91,13 +93,83 @@ def run(argv, *, data=None, timeout=120, safe='Команда системы н�
                 if stream is not None:
                     stream.close()
     if child.returncode:
-        raise Failure('SYSTEM_COMMAND_FAILED', safe)
+        error = Failure('SYSTEM_COMMAND_FAILED', safe)
+        error.command_returncode = child.returncode  # Safe internal classification; never argv/output.
+        raise error
     return output if capture else b''
 
 
 def identity(name):
     value = pwd.getpwnam(name)
     return value.pw_uid, value.pw_gid
+
+
+def wait_package_locks(timeout=120):
+    """Wait for the existing POSIX package locks without deleting/replacing them.
+
+    The locks are released before dpkg starts. A new owner can win that small
+    race; dpkg must still acquire its own locks and will fail safely in that case.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        descriptors, busy = [], False
+        try:
+            for path in PACKAGE_LOCKS:
+                try:
+                    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    raise Failure('PACKAGE_MANAGER_UNAVAILABLE', 'Не удалось проверить блокировку пакетов. Проверьте состояние APT/dpkg и повторите --resume.') from None
+                descriptors.append(fd)
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1:
+                    raise Failure('UNSAFE_PATH', 'Обнаружен неподходящий файл блокировки пакетов; автоматическое продолжение запрещено.')
+                try:
+                    fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as error:
+                    if error.errno not in (errno.EACCES, errno.EAGAIN):
+                        raise Failure('PACKAGE_MANAGER_UNAVAILABLE', 'Не удалось проверить блокировку пакетов. Проверьте APT/dpkg и повторите --resume.') from None
+                    busy = True
+                    break
+            if not busy:
+                return
+        finally:
+            for fd in reversed(descriptors):
+                os.close(fd)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise Failure('PACKAGE_MANAGER_BUSY', 'APT/dpkg занят другой операцией. Дождитесь её завершения и повторите --resume; не удаляйте файлы блокировки.')
+        time.sleep(min(1, remaining))
+
+
+def prepare_system_packages(resume=False):
+    if resume:
+        wait_package_locks()
+        # A killed apt/dpkg can leave a dirty journal. apt refuses a new install
+        # until dpkg merges it and finishes pending package configuration.
+        try:
+            run(['dpkg', '--force-confdef', '--force-confold', '--configure', '--pending'], timeout=1200,
+                safe='Не удалось завершить настройку пакетов. Проверьте APT/dpkg и повторите --resume; файлы блокировки удалять нельзя.')
+        except Failure as error:
+            # An incomplete unpack can also leave missing dependencies. The
+            # explicit install below may repair these, but may never remove
+            # packages. A remaining journal/lock/configuration error still
+            # causes that bounded apt command to stop safely.
+            if getattr(error, 'command_returncode', None) != 1:
+                raise Failure('PACKAGE_CONFIGURATION_FAILED', 'Не удалось завершить настройку пакетов. Проверьте APT/dpkg и повторите --resume; не удаляйте файлы блокировки.') from None
+            repair = True
+        else:
+            repair = False
+    else:
+        repair = False
+    apt = ['apt-get', '-o', 'DPkg::Lock::Timeout=120',
+           '-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold']
+    run(apt + ['update', '-qq'], timeout=600, safe='Не удалось обновить список пакетов Ubuntu. Проверьте сеть и APT; затем повторите --resume.')
+    options = ['--fix-broken', '--no-remove'] if repair else ['--no-remove']
+    run(apt + ['install', '-y', '-qq', *options, 'nginx', 'mysql-server', 'php8.3-fpm', 'php8.3-cli',
+               'php8.3-curl', 'php8.3-mbstring', 'python3-venv', 'ca-certificates', 'curl', 'logrotate'],
+        timeout=1200, safe='Настройка пакетов не завершена. Дождитесь других операций APT/dpkg; при необходимости выполните dpkg --configure --pending и повторите --resume. Не удаляйте файлы блокировки.')
 
 
 def directory(path, mode=0o750, owner=None):
@@ -946,6 +1018,17 @@ def normalize_node_tree(root):
             elif stat.S_ISREG(info.st_mode):
                 if info.st_uid != 0 or info.st_mode & 0o022 or info.st_nlink != 1:
                     raise Failure('UNSAFE_PATH', 'Node.js содержит неподтверждённый файл.')
+                child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
+                try:
+                    opened = os.fstat(child)
+                    if not stat.S_ISREG(opened.st_mode) or opened.st_uid != 0 or opened.st_nlink != 1 or opened.st_mode & 0o022:
+                        raise Failure('UNSAFE_PATH', 'Node.js содержит неподтверждённый файл.')
+                    try:
+                        os.fsync(child)
+                    except OSError:
+                        raise Failure('NODE_UNAVAILABLE', 'Запись файлов Node.js на диск не подтверждена. Проверьте диск и повторите --resume.') from None
+                finally:
+                    os.close(child)
                 entries[current] = 'file'
             elif stat.S_ISLNK(info.st_mode):
                 target = os.readlink(name, dir_fd=descriptor)
@@ -955,6 +1038,10 @@ def normalize_node_tree(root):
                 entries[current], links[current] = 'link', target
             else:
                 raise Failure('UNSAFE_PATH', 'Node.js содержит специальный файл.')
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            raise Failure('NODE_UNAVAILABLE', 'Запись каталогов Node.js на диск не подтверждена. Проверьте диск и повторите --resume.') from None
 
     descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -1064,15 +1151,40 @@ def seal_dependencies(root):
                         raise Failure('UNSAFE_DEPENDENCY', 'Зависимости содержат неподходящий файл.')
                     os.fchown(child, 0, 0)
                     os.fchmod(child, 0o644)
+                    try:
+                        os.fsync(child)
+                    except OSError:
+                        raise Failure('INVALID_DEPENDENCIES', 'Запись зависимостей на диск не подтверждена. Проверьте диск и повторите --resume.') from None
                 finally:
                     os.close(child)
             else:
                 raise Failure('UNSAFE_DEPENDENCY', 'Ссылки и специальные файлы зависимостей запрещены.')
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            raise Failure('INVALID_DEPENDENCIES', 'Запись каталогов зависимостей на диск не подтверждена. Проверьте диск и повторите --resume.') from None
     descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         seal(descriptor)
     finally:
         os.close(descriptor)
+
+
+def verify_dependencies(source):
+    """Load mysql2 as the app UID without a connection or database/provider API."""
+    source = Path(source)
+    target = source / 'node_modules'
+    validate_source(target)
+    entry = target / 'mysql2/promise.js'
+    if not entry.is_file() or entry.is_symlink() or entry.stat().st_size == 0:
+        raise Failure('INVALID_DEPENDENCIES', 'Сохранённые зависимости неполны. Требуется проверка установленного пакета; существующие файлы автоматически не удаляются.')
+    probe = "const m=require(process.argv[1]);if(typeof m.createConnection!=='function'||typeof m.createPool!=='function')process.exit(1);"
+    try:
+        run(['runuser', '-u', APP_USER, '--', NODE, '-e', probe, entry], timeout=30,
+            cwd=source,
+            safe='Сохранённые зависимости не прошли проверку Node.js. Проверьте установленный пакет; файлы автоматически не удаляются.')
+    except Failure:
+        raise Failure('INVALID_DEPENDENCIES', 'Сохранённые зависимости не прошли проверку Node.js. Проверьте установленный пакет; файлы автоматически не удаляются.') from None
 
 
 def prepare_dependencies(release):
@@ -1090,8 +1202,18 @@ def prepare_dependencies(release):
     checkpoint = {'lock_sha256': hashlib.sha256(lock_bytes).hexdigest(), 'node': NODE_VERSION}
     target = source / 'node_modules'
     if target.exists() or target.is_symlink():
-        if target.is_symlink() or read_json(target / '.gitreposted-install.json') != checkpoint:
+        if target.is_symlink() or not target.is_dir():
             raise Failure('INVALID_DEPENDENCIES', 'Существующие зависимости не подтверждены.')
+        try:
+            saved = read_json(target / '.gitreposted-install.json')
+        except (OSError, ValueError, UnicodeError):
+            raise Failure('INVALID_DEPENDENCIES', 'Отметка существующих зависимостей повреждена; файлы автоматически не удаляются.') from None
+        if saved != checkpoint:
+            raise Failure('INVALID_DEPENDENCIES', 'Существующие зависимости не подтверждены.')
+        verify_dependencies(source)
+        # Packages written by an older interrupted installer may have a marker
+        # without durable nested file data. Re-seal/flush only this verified tree.
+        seal_dependencies(target)
         return
     stage = Path(tempfile.mkdtemp(prefix='.npm-stage.', dir=release))
     try:
@@ -1109,6 +1231,7 @@ def prepare_dependencies(release):
         seal_dependencies(stage)
         if not (stage / 'node_modules/mysql2/promise.js').is_file():
             raise Failure('INVALID_DEPENDENCIES', 'mysql2 не прошёл проверку установки.')
+        verify_dependencies(stage)
         atomic(stage / 'node_modules/.gitreposted-install.json', json.dumps(checkpoint), 0o644)
         os.rename(stage / 'node_modules', target)
         sync_directory(source)
@@ -1126,6 +1249,72 @@ def release_directory():
     return release
 
 
+def select_application_release(release, resume=False):
+    """Permit cross-release recovery only before wizard/application state exists.
+
+    This is not an updater. An interrupted early bootstrap may have selected
+    an older complete runtime before ACME failed; the public loader can now
+    contain a newer installer. Both release trees remain available.
+    """
+    release = Path(release)
+    if release != APP / 'releases' / VERSION or release.is_symlink() or release.resolve() != release:
+        raise Failure('UNSAFE_PATH', 'Новая версия находится вне ожидаемого каталога выпуска.')
+    validate_source(release)
+    current = APP / 'current'
+    if current.is_symlink():
+        if current.lstat().st_uid != 0:
+            raise Failure('UNSAFE_PATH', 'Текущая версия приложения должна выбираться root.')
+        try:
+            previous = current.resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise Failure('EXISTING_RELEASE', 'Не удалось подтвердить прежнюю версию приложения. Автоматическое переключение запрещено.') from None
+        if previous == release:
+            try:
+                sync_directory(APP)
+            except OSError:
+                raise Failure('RELEASE_UNAVAILABLE', 'Запись выбора выпуска на диск не подтверждена. Проверьте диск и повторите --resume.') from None
+            return
+        if not resume:
+            raise Failure('EXISTING_RELEASE', 'Найдена другая активная версия приложения.')
+        public = read_json(STATE / 'public.json', {})
+        private = read_json(STATE / 'private.json', {})
+        if (not isinstance(public, dict) or not isinstance(private, dict)
+                or public.get('tls_ready') or public.get('installed')
+                or any(private.get(key) for key in ('settings', 'config', 'job'))
+                or CONFIG.exists() or CONFIG.is_symlink()
+                or (STATE / 'installed.json').exists() or (STATE / 'installed.json').is_symlink()):
+            raise Failure('EXISTING_RELEASE', 'Настройка приложения уже начата. Продолжите прежний выпуск; автоматическое обновление запрещено.')
+        import re
+        if previous.parent != APP / 'releases' or re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?', previous.name) is None:
+            raise Failure('UNSAFE_PATH', 'Прежняя версия находится вне каталога выпусков; переключение запрещено.')
+        validate_source(previous)
+        for name in ('server.js', 'package.json', 'package-lock.json'):
+            if not (previous / 'src' / name).is_file():
+                raise Failure('EXISTING_RELEASE', 'Прежний выпуск приложения не подтверждён; переключение запрещено.')
+        units = run(['systemctl', 'list-units', '--all', '--type=service', '--no-legend', '--plain',
+                     'gitreposted-bridge.service'], timeout=15,
+                    safe='Не удалось подтвердить остановку приложения; автоматическое переключение запрещено.').decode().strip()
+        if units and (len(units.splitlines()) != 1 or units.split()[:4] != ['gitreposted-bridge.service', 'loaded', 'inactive', 'dead']):
+            raise Failure('EXISTING_RELEASE', 'Приложение уже запущено или запускается; автоматическое переключение запрещено.')
+        temporary = APP / ('.current-select.' + secrets.token_hex(8))
+        try:
+            temporary.symlink_to(release)
+            os.replace(temporary, current)
+            sync_directory(APP)
+        except OSError:
+            raise Failure('RELEASE_UNAVAILABLE', 'Выбор полного выпуска на диске не подтверждён. Проверьте диск и повторите --resume; прежний каталог выпуска сохранён.') from None
+        finally:
+            temporary.unlink(missing_ok=True)
+    elif current.exists():
+        raise Failure('UNSAFE_PATH', 'Путь current уже занят.')
+    else:
+        try:
+            current.symlink_to(release)
+            sync_directory(APP)
+        except OSError:
+            raise Failure('RELEASE_UNAVAILABLE', 'Выбор полного выпуска на диске не подтверждён. Проверьте диск и повторите --resume.') from None
+
+
 def install(source, ip, host, resume=False, checked=False, package=None):
     if not checked:
         preflight(resume)
@@ -1137,10 +1326,7 @@ def install(source, ip, host, resume=False, checked=False, package=None):
     # The curl loader removes its temporary archive on every exit. Persist a
     # complete root-owned resume entry point before apt/network operations.
     persist_bundle(source, files)
-    run(['apt-get', 'update', '-qq'], timeout=600, safe='Не удалось обновить список пакетов Ubuntu.')
-    run(['apt-get', 'install', '-y', '-qq', 'nginx', 'mysql-server', 'php8.3-fpm', 'php8.3-cli',
-         'php8.3-curl', 'php8.3-mbstring', 'python3-venv', 'ca-certificates', 'curl', 'logrotate'],
-        timeout=1200, safe='Установка системных пакетов не завершена. Используйте --resume.')
+    prepare_system_packages(resume)
     mysql_version = run(['mysql', '-NBe', 'SELECT VERSION()']).decode().strip()
     if not mysql_version.startswith('8.0.') or 'MariaDB' in mysql_version:
         raise Failure('MYSQL_VERSION', 'Нужен MySQL 8.0. Установка остановлена.')
@@ -1161,14 +1347,7 @@ def install(source, ip, host, resume=False, checked=False, package=None):
     copy_tree(INSTALL / 'payload/src', release / 'src')
     prepare_node()
     prepare_dependencies(release)
-    current = APP / 'current'
-    if current.is_symlink():
-        if current.resolve() != release:
-            raise Failure('EXISTING_RELEASE', 'Найдена другая активная версия приложения.')
-    elif current.exists():
-        raise Failure('UNSAFE_PATH', 'Путь current уже занят.')
-    else:
-        current.symlink_to(release)
+    select_application_release(release, resume)
     certbot_venv = STATE / 'certbot'
     directory(certbot_venv, 0o700)
     if not CERTBOT.exists():

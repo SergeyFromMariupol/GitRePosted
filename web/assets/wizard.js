@@ -252,7 +252,16 @@
         enrollmentCode = null;
         const job = normalizedJob(status.job);
         let unstartedMutation = null;
-        if (job.status === 'running' || (job.status === 'failed' && state.editingJobId !== job.id)) {
+        if (job.status === 'failed' && state.editingJobId === job.id && state.pendingMutation) {
+            // A lost edit response can describe either an unchanged failed job
+            // or an accepted revision which failed quickly with the same id.
+            // The server has confirmed a terminal state: preserve the entered
+            // form for an explicit correction instead of polling it forever.
+            unstartedMutation = state.pendingMutation;
+            state.pendingMutation = null;
+        }
+        if (job.status === 'running' || (job.status === 'failed' && (state.editingJobId !== job.id ||
+            (job.type === 'install' && !job.canRevise)))) {
             state.editingJobId = ''; state.reviseJobId = '';
             state.pendingMutation = null; renderJob(job); showScreen('job-screen');
             if (job.status === 'running') schedulePoll(); else cancelPoll();
@@ -285,8 +294,9 @@
             setText('host-ready-url', status.site_url || status.base_url || '');
         }
         showScreen('wizard-screen'); showStep(state.step, false);
-        if (unstartedMutation) setError(unstartedMutation.type === 'host' ? 'host-error' : 'settings-error',
-            'Сервер не сообщает о запущенном задании. Проверьте настройки и повторите запуск вручную. Повтор автоматически не выполнялся.');
+        if (unstartedMutation) setError(unstartedMutation.type === 'host' ? 'host-error' : 'settings-error', job.status === 'failed'
+            ? 'Задание остановлено: ' + (job.error || 'сервер не сообщил причину.') + ' Ответ на запрос изменения не подтверждён. Проверьте настройки и повторите действие вручную; автоматически запрос не повторялся.'
+            : 'Сервер не сообщает о запущенном задании. Проверьте настройки и повторите запуск вручную. Повтор автоматически не выполнялся.');
     }
 
     async function refreshStatus(manual) {
