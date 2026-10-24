@@ -3,114 +3,97 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="GitRePosted автоматически пересылает публикации между каналами Telegram и МАКС.">
-  <title>GitRePosted — автоматические пересылки между каналами</title>
+  <meta name="description" content="Бесплатная автопересылка постов между Telegram и МАКС. GitRePosted — открытый код MIT, свои боты и сервер, без платы за каждый канал. Установка с GitHub.">
+  <meta name="robots" content="index,follow,max-image-preview:large">
+  <meta name="theme-color" content="#101418">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="ru_RU">
+  <meta property="og:site_name" content="GitRePosted">
+  <meta property="og:title" content="GitRePosted — бесплатная автопересылка Telegram и МАКС">
+  <meta property="og:description" content="Открытый код MIT для своего сервера и своих ботов. Автопересылка публикаций без платы за каждый канал.">
+  <meta name="twitter:card" content="summary">
+  <title>GitRePosted — бесплатный репост Telegram и МАКС, открытый код</title>
   <link rel="icon" type="image/png" href="/assets/reposted-logo.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/landing.css?v=20260720k">
-  <link rel="stylesheet" href="/landing-strict.css?v=20260720b">
+  <link rel="stylesheet" href="/landing.css?v=20261024">
+  <link rel="stylesheet" href="/landing-strict.css?v=20261024">
+  <script type="application/ld+json">
+    {"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"GitRePosted","description":"Бесплатный проект с открытым исходным кодом для автоматической пересылки публикаций между каналами Telegram и МАКС на собственном сервере.","codeRepository":"https://github.com/SergeyFromMariupol/GitRePosted","url":"https://github.com/SergeyFromMariupol/GitRePosted","license":"https://github.com/SergeyFromMariupol/GitRePosted/blob/main/LICENSE","isAccessibleForFree":true,"programmingLanguage":"JavaScript","runtimePlatform":"Node.js"}
+  </script>
 </head>
 <body>
-  <header class="header">
-    <div class="header-inner">
-      <a class="logo" href="#top"><img src="/assets/reposted-logo.png" alt=""><span>GitRePosted</span></a>
-      <nav><a href="#about">Возможности</a><a href="#start">Подключение</a><a href="#faq">Вопросы</a></nav>
-      <a class="header-link" data-platform-link="telegram" aria-disabled="true" target="_blank" rel="noopener">Открыть бота</a>
-    </div>
-  </header>
-
-  <main id="top">
-    <section class="hero shell">
+  <a class="skip-link" href="#main">К содержимому</a>
+  <header class="header"><div class="header-inner">
+    <a class="logo" href="#top"><img src="/assets/reposted-logo.png" alt="" width="42" height="42"><span>GitRePosted</span></a>
+    <nav aria-label="Главная навигация"><a href="#about">Возможности</a><a href="#start">Установка</a><a href="#faq">Вопросы</a></nav>
+    <a class="header-link" href="https://github.com/SergeyFromMariupol/GitRePosted" target="_blank" rel="noopener">Код на GitHub ↗</a>
+  </div></header>
+  <main id="main">
+    <section class="hero shell" id="top" aria-labelledby="hero-title">
       <div class="hero-copy">
-        <div class="kicker"><i></i> Telegram и МАКС работают вместе</div>
-        <h1>Один пост.<br><span>Все ваши каналы.</span></h1>
-        <p>GitRePosted автоматически переносит публикации между Telegram и МАКС. Вы выбираете источник и получателей — бот доставляет текст, фотографии, видео и файлы.</p>
-        <div class="hero-buttons">
-          <a class="btn btn-primary" data-platform-link="telegram" aria-disabled="true" target="_blank" rel="noopener"><img src="/assets/telegram.png" alt="">Начать в Telegram</a>
-          <a class="btn btn-secondary" data-platform-link="max" aria-disabled="true" target="_blank" rel="noopener"><img src="/assets/max.png" alt="">Открыть в МАКС</a>
-        </div>
-        <div class="hero-points"><span>Без ограничения каналов</span><span>Настройка прямо в боте</span></div>
+        <div class="kicker"><i aria-hidden="true"></i> Бесплатный open source · MIT</div>
+        <h1 id="hero-title">Автопересылка<br><span>Telegram ↔ МАКС</span></h1>
+        <p>Публикуйте в одном канале — GitRePosted перенесёт новые записи в выбранные каналы Telegram и МАКС. Установите проект на своём сервере и подключите своих ботов.</p>
+        <div class="hero-buttons"><a class="btn btn-primary" href="https://github.com/SergeyFromMariupol/GitRePosted#установка" target="_blank" rel="noopener">Код и установка на GitHub ↗</a><a class="btn btn-secondary" href="#start">Как подключить каналы</a></div>
+        <div class="hero-points"><span>Без платы за каждый канал</span><span>Свои боты</span><span>Открытый код MIT</span></div>
+        <p class="hero-note">Код бесплатный. Сервер вы оплачиваете самостоятельно, домен — по желанию. Возможности зависят от ресурсов сервера и API мессенджеров.</p>
       </div>
-
-      <div class="product-card" aria-label="Пример автоматической пересылки">
-        <div class="product-head"><span>Активная пересылка</span><b><i></i> Работает</b></div>
-        <div class="route-channel">
-          <img src="/assets/telegram.png" alt="">
-          <div><small>Источник · Telegram</small><strong>Новости района</strong></div>
-          <span class="ok">✓</span>
-        </div>
-        <div class="route-path"><i></i><span>Публикация передаётся автоматически</span><i></i></div>
-        <div class="route-channel">
-          <img src="/assets/max.png" alt="">
-          <div><small>Получатель · МАКС</small><strong>Новости района</strong></div>
-          <span class="ok">✓</span>
-        </div>
-        <div class="post-preview">
-          <div class="preview-media"><span>MEDIA</span></div>
-          <div><strong>Новая публикация</strong><p>Текст и вложения доставлены в связанный канал.</p></div>
-        </div>
-        <div class="product-glow"></div>
+      <div class="product-card" aria-label="Пример маршрута из Telegram в МАКС">
+        <div class="product-head"><span>Пример маршрута</span><b><i aria-hidden="true"></i> Автопересылка</b></div>
+        <div class="route-channel"><img src="/assets/telegram.png" alt="" width="43" height="43"><div><small>Источник · Telegram</small><strong>Ваш канал с новостями</strong></div><span class="ok" aria-hidden="true">✓</span></div>
+        <div class="route-path"><i></i><span>Новая публикация → выбранные получатели</span><i></i></div>
+        <div class="route-channel"><img src="/assets/max.png" alt="" width="43" height="43"><div><small>Получатель · МАКС</small><strong>Ваш канал в МАКС</strong></div><span class="ok" aria-hidden="true">✓</span></div>
+        <div class="post-preview"><div class="preview-media"><span>ТЕКСТ + МЕДИА</span></div><div><strong>Одна исходная публикация</strong><p>Текст и поддерживаемые вложения для связанных каналов.</p></div></div>
       </div>
     </section>
-
-    <section class="messenger-bar shell" aria-label="Доступность ботов">
-      <div class="bar-title"><span>Запустить GitRePosted</span><small>Выберите удобный мессенджер</small></div>
-      <a data-platform-link="telegram" aria-disabled="true" target="_blank" rel="noopener"><img src="/assets/telegram.png" alt=""><span><b>Telegram</b><small>Перейти к боту</small></span><em class="state loading" data-public-state="telegram">Проверяем</em></a>
-      <a data-platform-link="max" aria-disabled="true" target="_blank" rel="noopener"><img src="/assets/max.png" alt=""><span><b>МАКС</b><small>Перейти к боту</small></span><em class="state loading" data-public-state="max">Проверяем</em></a>
-    </section>
-
-    <section class="features shell" id="about">
-      <div class="section-title"><span>ВОЗМОЖНОСТИ</span><h2>Пересылки без ручной работы</h2><p>Один понятный инструмент для всей сети ваших каналов.</p></div>
+    <section class="features shell" id="about" aria-labelledby="features-title">
+      <div class="section-title"><span>ВОЗМОЖНОСТИ</span><h2 id="features-title">Пересылки без ручного копирования</h2><p>Вы выбираете каналы и направление, бот обрабатывает новые публикации по сохранённым маршрутам.</p></div>
       <div class="feature-grid">
-        <article class="feature large">
-          <div class="feature-icon route-icon"><span></span><i></i><span></span></div>
-          <h3>Между любыми каналами</h3>
-          <p>Telegram → МАКС, МАКС → Telegram и пересылки внутри одного мессенджера.</p>
-          <div class="route-tags"><span>Telegram</span><b>→</b><span>МАКС</span></div>
-        </article>
-        <article class="feature"><div class="feature-icon">↗</div><h3>Один во многие</h3><p>Отправляйте публикацию из одного источника сразу в несколько каналов.</p></article>
-        <article class="feature"><div class="feature-icon">↙</div><h3>Многие в один</h3><p>Собирайте публикации нескольких источников в одном выбранном канале.</p></article>
-        <article class="feature"><div class="feature-icon">▣</div><h3>Контент целиком</h3><p>Текст, фото, видео, альбомы и поддерживаемые документы передаются вместе.</p></article>
-        <article class="feature wide"><div class="feature-icon">⌁</div><div><h3>Управление в привычном чате</h3><p>Создавайте, временно отключайте, меняйте и удаляйте пересылки через меню бота — без отдельного приложения.</p></div><div class="menu-preview"><span>Создать пересылку</span><span>Настроенные пересылки</span><span>Добавить канал</span><span>Связь аккаунтов</span></div></article>
+        <article class="feature large"><div class="feature-icon" aria-hidden="true">↔</div><h3>Между Telegram и МАКС</h3><p>Переносите публикации из Telegram в МАКС, из МАКС в Telegram или между каналами одной платформы.</p><div class="route-tags"><span>Telegram</span><b>↔</b><span>МАКС</span></div></article>
+        <article class="feature"><div class="feature-icon" aria-hidden="true">↗</div><h3>Один во многие</h3><p>Выберите несколько получателей для одного канала-источника.</p></article>
+        <article class="feature"><div class="feature-icon" aria-hidden="true">↙</div><h3>Многие в один</h3><p>Собирайте новые записи нескольких источников в выбранном канале.</p></article>
+        <article class="feature"><div class="feature-icon" aria-hidden="true">▣</div><h3>Текст и медиа</h3><p>Фото, видео, альбомы и документы — в пределах поддерживаемых форматов и лимитов Telegram и МАКС.</p></article>
+        <article class="feature wide"><div class="feature-icon" aria-hidden="true">⌁</div><div><h3>Управление в меню бота</h3><p>Добавляйте каналы, создавайте маршруты, включайте и выключайте пересылки. Настройки самой установки доступны в веб-панели.</p></div><div class="menu-preview" aria-label="Разделы меню"><span>Создать пересылку</span><span>Настроенные пересылки</span><span>Добавить канал</span><span>Связь аккаунтов</span></div></article>
       </div>
     </section>
-
-    <section class="how" id="start">
-      <div class="shell">
-        <div class="section-title"><span>ПОДКЛЮЧЕНИЕ</span><h2>Три шага до первой пересылки</h2><p>Настройка занимает несколько минут и не требует технических знаний.</p></div>
-        <div class="steps">
-          <article><b>01</b><div class="step-mark">01</div><h3>Откройте бота</h3><p>Запустите GitRePosted в Telegram или МАКС и откройте раздел добавления канала.</p></article>
-          <article><b>02</b><div class="step-mark">02</div><h3>Дайте право публикации</h3><p><strong>Telegram:</strong> назначьте бота администратором только с правом публикации.<br><strong>МАКС:</strong> добавьте бота в участники, затем в администраторы с правом «Писать посты».</p></article>
-          <article><b>03</b><div class="step-mark">03</div><h3>Создайте маршрут</h3><p>Выберите, откуда брать публикации и в какие каналы их автоматически отправлять.</p></article>
-        </div>
+    <section class="projects shell" aria-labelledby="projects-title">
+      <div class="section-title"><span>ДВА ПРОЕКТА — ДВЕ ЗАДАЧИ</span><h2 id="projects-title">Пересылать или планировать?</h2><p>GitRePosted и GitPosted можно установить самостоятельно. Выбирайте инструмент под свою работу с каналами.</p></div>
+      <div class="project-grid">
+        <article class="project-choice current"><span class="project-label">АВТОПЕРЕСЫЛКА</span><h3>GitRePosted</h3><p>Берёт новые, уже опубликованные записи из канала-источника и передаёт их в выбранные каналы Telegram и МАКС.</p><a class="text-link" href="https://github.com/SergeyFromMariupol/GitRePosted" target="_blank" rel="noopener">GitRePosted на GitHub ↗</a></article>
+        <article class="project-choice"><span class="project-label">ОТЛОЖЕННЫЙ ПОСТИНГ</span><h3>GitPosted</h3><p>Для подготовки публикаций, планирования и постинга по расписанию в Telegram и МАКС есть отдельный проект GitPosted.</p><div class="project-links"><a class="text-link" href="https://gitposted.ru/">Открыть GitPosted ↗</a><a class="text-link" href="https://github.com/SergeyFromMariupol/GitPosted" target="_blank" rel="noopener">Исходный код ↗</a></div></article>
       </div>
     </section>
-
-    <section class="control shell">
-      <div class="control-copy"><span>ВАШИ ДАННЫЕ</span><h2>Каждый управляет только своими каналами</h2><p>Каналы и пересылки привязаны к владельцу. Другие пользователи не видят их и не могут менять настройки.</p></div>
-      <div class="control-list"><div><i>✓</i><span><b>Минимальные права</b><small>Только публикация сообщений</small></span></div><div><i>✓</i><span><b>Раздельный доступ</b><small>Свои каналы у каждого пользователя</small></span></div><div><i>✓</i><span><b>Контроль маршрутов</b><small>Отключение и удаление в любой момент</small></span></div></div>
+    <section class="how" id="start" aria-labelledby="start-title"><div class="shell">
+      <div class="section-title"><span>СВОЯ УСТАНОВКА</span><h2 id="start-title">От сервера до первой пересылки</h2><p>Установщик готовит приложение и подключает выбранных ботов. Каналы, права и маршруты выбираете вы.</p></div>
+      <div class="steps">
+        <article><b aria-hidden="true">01</b><div class="step-mark">01</div><h3>Установите проект</h3><p>Возьмите установщик в GitHub, запустите его на чистом Ubuntu Server 24.04 и откройте HTTPS-мастер. Укажите токены своих ботов для нужных платформ.</p></article>
+        <article><b aria-hidden="true">02</b><div class="step-mark">02</div><h3>Подтвердите каналы</h3><p>Добавьте своего бота администратором с правом публикации. В «Добавить канал» перешлите ему запись из каждого канала. Проверяются и ваши права, и права бота.</p></article>
+        <article><b aria-hidden="true">03</b><div class="step-mark">03</div><h3>Создайте пересылку</h3><p>Для Telegram ↔ МАКС свяжите аккаунты шестизначным кодом. Выберите источник и получателей, сохраните маршрут и проверьте его в своих тестовых каналах.</p></article>
+      </div>
+      <p class="section-note"><a class="text-link" href="https://github.com/SergeyFromMariupol/GitRePosted/blob/main/docs/INSTALLATION.md" target="_blank" rel="noopener">Пошаговая инструкция: сервер, домен, боты и каналы ↗</a></p>
+    </div></section>
+    <section class="control shell" aria-labelledby="control-title">
+      <div class="control-copy"><span>БЕСПЛАТНЫЙ КОД, СВОЙ СЕРВЕР</span><h2 id="control-title">Ваша установка.<br>Ваши правила.</h2><p>GitRePosted распространяется по лицензии MIT. За исходный код и каждый подключённый канал платить проекту не нужно. Вы размещаете приложение у себя и самостоятельно оплачиваете сервер.</p><p>Канал закрепляется за аккаунтом после проверки прав. Владелец установки управляет доступом пользователей и настройками через свою панель.</p></div>
+      <div class="control-list"><div><i aria-hidden="true">✓</i><span><b>Лицензия MIT</b><small>Код можно изучать, использовать и изменять</small></span></div><div><i aria-hidden="true">✓</i><span><b>Без поканальной подписки</b><small>В проекте нет платы за подключение каждого канала</small></span></div><div><i aria-hidden="true">✓</i><span><b>Реальные технические границы</b><small>Действуют лимиты API, форматов и ресурсов сервера</small></span></div></div>
     </section>
-
-    <section class="faq shell" id="faq">
-      <div class="section-title"><span>ВОПРОСЫ</span><h2>Коротко о главном</h2></div>
+    <section class="faq shell" id="faq" aria-labelledby="faq-title">
+      <div class="section-title"><span>ВОПРОСЫ</span><h2 id="faq-title">Бесплатный постер или автопересылка?</h2></div>
       <div class="faq-list">
-        <details><summary>Как бот понимает, какие каналы принадлежат мне?<i>+</i></summary><p>Добавьте бота администратором канала, затем перешлите сообщение из этого канала в личный чат с GitRePosted. Бот проверит права и привяжет канал к вашему аккаунту.</p></details>
-        <details><summary>Какие права нужны боту?<i>+</i></summary><p>Только право публикации. В Telegram оставьте публикацию сообщений. В МАКС сначала добавьте бота в участники, затем назначьте администратором с единственным правом «Писать посты».</p></details>
-        <details><summary>Можно отправлять один пост в несколько каналов?<i>+</i></summary><p>Да. Один источник можно связать с любым количеством каналов-получателей.</p></details>
-        <details><summary>Что происходит с фотографиями и файлами?<i>+</i></summary><p>GitRePosted переносит поддерживаемые вложения вместе с текстом. Форматы, которые МАКС не принимает напрямую, бот безопасно упаковывает.</p></details>
+        <details><summary>GitRePosted действительно бесплатный?<i aria-hidden="true">+</i></summary><p>Да, исходный код доступен бесплатно по лицензии MIT. При самостоятельной установке нет платы проекту за каждый канал. Сервер вы оплачиваете сами; домен можно подключить по желанию.</p></details>
+        <details><summary>Это бесплатная альтернатива Posted / @posted?<i aria-hidden="true">+</i></summary><p>Выбирайте по задаче. GitRePosted нужен для автоматической пересылки уже опубликованных записей. Если вы ищете бесплатный постер для планирования и отложенных публикаций, посмотрите <a class="text-link" href="https://gitposted.ru/">GitPosted</a>. Оба проекта имеют открытый код для самостоятельной установки. Это независимые проекты, а не официальная версия Posted (@posted).</p></details>
+        <details><summary>Как добавить свои каналы?<i aria-hidden="true">+</i></summary><p>Добавьте своего бота администратором с правом публикации, затем перешлите ему запись из канала в личный диалог. Ваш аккаунт тоже должен быть владельцем или администратором канала. После проверки канал появится при создании маршрута. Для межплатформенной пересылки свяжите свои аккаунты Telegram и МАКС через меню бота.</p></details>
+        <details><summary>Есть ли ограничения по каналам и вложениям?<i aria-hidden="true">+</i></summary><p>Лицензия не предусматривает поканальной платы. Практическая нагрузка зависит от вашего сервера, а размеры файлов, форматы, права и скорость запросов ограничиваются API Telegram и МАКС. Неподдерживаемый формат не превращается автоматически в поддерживаемый.</p></details>
+        <details><summary>Где установщик и насколько готов проект?<i aria-hidden="true">+</i></summary><p>Установщик, инструкции и код находятся в <a class="text-link" href="https://github.com/SergeyFromMariupol/GitRePosted" target="_blank" rel="noopener">репозитории GitHub</a>. Проект находится в предварительном выпуске. Актуальные проверки и ограничения описаны в <a class="text-link" href="https://github.com/SergeyFromMariupol/GitRePosted/blob/main/docs/TESTING.md" target="_blank" rel="noopener">документе TESTING</a>; свои боты и маршруты сначала проверьте в тестовых каналах.</p></details>
       </div>
     </section>
-
-    <section class="cta shell">
-      <div><span>REPOSTED</span><h2>Публикуйте один раз.<br>Остальное сделает бот.</h2></div>
-      <div><p>Выберите мессенджер и настройте первую пересылку.</p><div class="hero-buttons"><a class="btn btn-primary" data-platform-link="telegram" aria-disabled="true" target="_blank" rel="noopener">Telegram</a><a class="btn btn-secondary" data-platform-link="max" aria-disabled="true" target="_blank" rel="noopener">МАКС</a></div></div>
+    <section class="cta shell" aria-labelledby="cta-title">
+      <div><span>GITREPOSTED · OPEN SOURCE</span><h2 id="cta-title">Соберите свою<br>сеть пересылок.</h2><p class="cta-description">Начните с исходного кода и инструкции по установке.</p><div class="hero-buttons"><a class="btn btn-primary" href="https://github.com/SergeyFromMariupol/GitRePosted" target="_blank" rel="noopener">Открыть GitHub ↗</a></div></div>
+      <div><p>Боты этой установки доступны, когда её владелец включил публичный доступ.</p><div class="hero-buttons"><a class="btn btn-secondary" data-platform-link="telegram" aria-disabled="true" target="_blank" rel="noopener"><img src="/assets/telegram.png" alt="" width="22" height="22">Telegram</a><a class="btn btn-secondary" data-platform-link="max" aria-disabled="true" target="_blank" rel="noopener"><img src="/assets/max.png" alt="" width="22" height="22">МАКС</a></div><noscript><p class="section-note">Для проверки доступности ботов нужен JavaScript. Код и инструкция на GitHub доступны без него.</p></noscript></div>
     </section>
   </main>
-
-  <footer><div class="shell"><a class="logo" href="#top"><img src="/assets/reposted-logo.png" alt=""><span>GitRePosted</span></a><p>Автоматические пересылки между Telegram и МАКС.</p><span>© 2026</span></div></footer>
-
+  <footer><div class="shell"><a class="logo" href="#top"><img src="/assets/reposted-logo.png" alt="" width="42" height="42"><span>GitRePosted</span></a><p>Автопересылка Telegram ↔ МАКС · Бесплатный код MIT</p><div class="footer-links"><a href="https://github.com/SergeyFromMariupol/GitRePosted" target="_blank" rel="noopener">GitHub ↗</a><a href="/control/">Панель этой установки</a></div></div></footer>
   <script>
     fetch('/api/public-status').then(r => r.json()).then(data => {
       document.querySelectorAll('[data-platform-link]').forEach(el => {
@@ -126,12 +109,7 @@
         if (url) { el.href = url; el.removeAttribute('aria-disabled'); }
         else { el.removeAttribute('href'); el.setAttribute('aria-disabled', 'true'); }
       });
-      document.querySelectorAll('[data-public-state]').forEach(el => {
-        const enabled = Boolean(data[el.dataset.publicState]?.public);
-        el.textContent = enabled ? 'Публичный' : 'Приватный';
-        el.className = `state ${enabled ? 'public' : 'private'}`;
-      });
-    }).catch(() => document.querySelectorAll('[data-public-state]').forEach(el => { el.textContent = 'Недоступен'; el.className = 'state private'; }));
+    }).catch(() => {});
   </script>
 </body>
 </html>
