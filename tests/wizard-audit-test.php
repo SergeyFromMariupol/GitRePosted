@@ -58,4 +58,23 @@ foreach (['valid', 'csrf', 'anonymous', 'bad-job', 'unknown-key'] as $case) {
     echo ($passed ? 'PASS ' : 'FAIL ') . 'revise ' . $case . " enforces the authenticated bounded settings contract\n";
     if (!$passed) $failures++;
 }
+foreach (['HOST_IN_USE' => 'другим проектом', 'SHARED_INSTALL_BUSY' => 'Другой установщик',
+    'HOST_LIMIT' => '32', 'PEER_INCOMPLETE' => 'Сначала завершите',
+    'UNTRUSTED_PEER' => 'не прошли проверку', 'SHARED_PACKAGE_CHANGE_REQUIRED' => 'отдельного обслуживания',
+    'NGINX_ROLLBACK_FAILED' => 'через SSH', 'INVALID_HOST' => 'DNS'] as $code => $expectedText) {
+    $now = 1800000000;
+    $public = ['installed' => false, 'tls_ready' => true, 'host' => 'setup.example.org', 'base_url' => 'https://setup.example.org'];
+    $session = ['authenticated' => true, 'created_at' => $now, 'last_activity' => $now, 'csrf' => str_repeat('a', 64)];
+    $controller = new Wizard(static fn(string $name): array => $public,
+        static fn(string $action, array $payload): array => ['ok' => false, 'error' => ['code' => $code, 'message' => 'private-raw-system-detail']],
+        static fn(): bool => true, $session, static fn(): int => $now);
+    $response = $controller->handle('POST', 'host', ['HTTPS' => 'on', 'HTTP_HOST' => 'setup.example.org',
+        'HTTP_ORIGIN' => 'https://setup.example.org', 'REMOTE_ADDR' => '192.0.2.10', 'CONTENT_TYPE' => 'application/json',
+        'HTTP_X_CSRF_TOKEN' => str_repeat('a', 64)], json_encode(['host' => 'next.example.org', 'email' => ''], JSON_THROW_ON_ERROR));
+    $passed = $response['status'] === 409 && ($response['body']['error']['code'] ?? '') === $code
+        && str_contains($response['body']['error']['message'] ?? '', $expectedText)
+        && !str_contains(json_encode($response), 'private-raw-system-detail');
+    echo ($passed ? 'PASS ' : 'FAIL ') . $code . " gives an actionable safe co-install error\n";
+    if (!$passed) $failures++;
+}
 exit($failures === 0 ? 0 : 1);

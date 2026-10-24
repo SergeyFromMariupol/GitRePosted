@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 import platform
 import pwd
 import grp
+import re
 import secrets
 import shutil
 import signal
@@ -27,7 +28,7 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
-VERSION = '0.1.0-rc.5'
+VERSION = '0.1.0-rc.6'
 INSTALL = Path('/opt/gitreposted-installer')
 APP = Path('/opt/gitreposted')
 STATE = Path('/var/lib/gitreposted-installer')
@@ -36,6 +37,8 @@ CONFIG = Path('/etc/gitreposted/config.json')
 LOG = Path('/var/log/gitreposted')
 ACME = Path('/var/www/gitreposted-acme')
 SITE = Path('/etc/nginx/sites-available/gitreposted-installer')
+ENABLED_SITE = Path('/etc/nginx/sites-enabled/gitreposted-installer')
+RENEWAL_DIR = Path('/etc/letsencrypt/renewal')
 CERTBOT = STATE / 'certbot/bin/certbot'
 APP_USER = 'gitreposted'
 SETUP_USER = 'gitreposted-setup'
@@ -43,6 +46,9 @@ NODE_ROOT = Path('/opt/gitreposted-node')
 NODE = NODE_ROOT / 'current/bin/node'
 NODE_VERSION = '24.22.1'
 PACKAGE_LOCKS = (Path('/var/lib/dpkg/lock-frontend'), Path('/var/lib/dpkg/lock'))
+SYSTEM_PACKAGES = ('nginx', 'mysql-server', 'php8.3-fpm', 'php8.3-cli', 'php8.3-mysql',
+                   'php8.3-curl', 'php8.3-mbstring', 'python3-venv', 'ca-certificates',
+                   'curl', 'cron', 'logrotate', 'unzip')
 # Official release SHASUMS: https://nodejs.org/en/blog/release/v24.22.1
 NODE_ARCHIVES = {
     'x86_64': ('x64', '6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6'),
@@ -54,6 +60,58 @@ class Failure(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+_coinstall_spec = importlib.util.spec_from_file_location('gitreposted_coinstall', Path(__file__).with_name('coinstall.py'))
+coinstall = importlib.util.module_from_spec(_coinstall_spec)
+_coinstall_spec.loader.exec_module(coinstall)
+
+
+@contextmanager
+def shared_lock(*, create=True):
+    """Serialize shared system changes with the sibling installer and broker."""
+    try:
+        with coinstall.shared_lock(create=create):
+            yield
+    except coinstall.CoInstallError as error:
+        raise Failure(error.code, str(error)) from None
+
+
+def peer_installation(ip=None, *, require_complete=True):
+    try:
+        return coinstall.inspect_peer('gitreposted', ip, require_complete=require_complete)
+    except coinstall.CoInstallError as error:
+        raise Failure(error.code, str(error)) from None
+
+
+def ensure_hosts_available(public):
+    if not isinstance(public, dict):
+        raise Failure('STATE_CONFLICT', 'Некорректное состояние адресов установки.')
+    hosts = [host_name(public['host']), host_name(public.get('site_host', public['host']))]
+    aliases = public.get('acme_hosts', [])
+    if not isinstance(aliases, list) or len(aliases) > 32:
+        raise Failure('STATE_CONFLICT', 'Некорректный список доменов установки.')
+    hosts.extend(host_name(host) for host in aliases)
+    if public.get('pending_host'):
+        hosts.append(host_name(public['pending_host']))
+    try:
+        return coinstall.validate_hosts('gitreposted', hosts, public.get('public_ip'))
+    except coinstall.CoInstallError as error:
+        raise Failure(error.code, str(error)) from None
+
+
+def verify_passive_apache_stub():
+    if shutil.which('apache2'):
+        raise Failure('EXISTING_SERVICE', 'На сервере уже есть Apache. Автоматическая установка остановлена.')
+    try:
+        present = coinstall.passive_apache_stub()
+    except coinstall.CoInstallError as error:
+        raise Failure(error.code, str(error)) from None
+    if present:
+        owner = run(['dpkg-query', '--search', '/etc/apache2/conf-available/php8.3-fpm.conf'],
+                    safe='Не удалось подтвердить происхождение неактивного PHP-FPM-файла Apache.')
+        if re.fullmatch(rb'php8\.3-fpm(?::[a-z0-9-]+)?: /etc/apache2/conf-available/php8\.3-fpm\.conf\n?', owner) is None:
+            raise Failure('UNMANAGED_WEB_SERVER', 'Неактивный файл Apache не принадлежит штатному пакету PHP-FPM. Установка остановлена.')
 
 
 def run(argv, *, data=None, timeout=120, safe='Команда системы не выполнена.', capture=True, cwd=None):
@@ -143,7 +201,20 @@ def wait_package_locks(timeout=120):
         time.sleep(min(1, remaining))
 
 
-def prepare_system_packages(resume=False):
+def prepare_system_packages(resume=False, shared_host=False):
+    packages = list(SYSTEM_PACKAGES)
+    if shared_host:
+        # A completed sibling owns the working stack. Do not upgrade it, run
+        # broad dpkg recovery, or ask apt to restart already-installed services.
+        versions = shared_package_inventory()
+        installed = {name.split(':', 1)[0] for name in versions}
+        if not {'nginx', 'mysql-server', 'php8.3-fpm'} <= installed:
+            raise Failure('SHARED_STACK_CHANGED', 'Общая установка nginx/MySQL/PHP повреждена. Восстановите первый проект до продолжения второго.')
+        missing = [name for name in packages if name not in installed]
+        if not missing:
+            return
+        add_shared_packages(missing, versions)
+        return
     if resume:
         wait_package_locks()
         # A killed apt/dpkg can leave a dirty journal. apt refuses a new install
@@ -167,9 +238,110 @@ def prepare_system_packages(resume=False):
            '-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold']
     run(apt + ['update', '-qq'], timeout=600, safe='Не удалось обновить список пакетов Ubuntu. Проверьте сеть и APT; затем повторите --resume.')
     options = ['--fix-broken', '--no-remove'] if repair else ['--no-remove']
-    run(apt + ['install', '-y', '-qq', *options, 'nginx', 'mysql-server', 'php8.3-fpm', 'php8.3-cli',
-               'php8.3-curl', 'php8.3-mbstring', 'python3-venv', 'ca-certificates', 'curl', 'logrotate'],
+    run(apt + ['install', '-y', '-qq', *options, *packages],
         timeout=1200, safe='Настройка пакетов не завершена. Дождитесь других операций APT/dpkg; при необходимости выполните dpkg --configure --pending и повторите --resume. Не удаляйте файлы блокировки.')
+
+
+def shared_package_inventory():
+    """Read exact installed versions; a partial dpkg transaction is not adopted."""
+    records = run(['dpkg-query', '--show', '--showformat=${binary:Package}\t${Version}\t${db:Status-Abbrev}\n'])
+    if len(records) > 8 * 1024 * 1024:
+        raise Failure('SHARED_STACK_CHANGED', 'Не удалось проверить установленные пакеты первого проекта.')
+    installed = {}
+    for line in records.decode('utf-8').splitlines():
+        fields = line.split('\t')
+        if len(fields) != 3:
+            raise Failure('SHARED_STACK_CHANGED', 'Некорректное состояние менеджера пакетов; первый проект не изменён.')
+        name, version, status = fields
+        if not re.fullmatch(r'[a-z0-9][a-z0-9+.-]*(?::[a-z0-9][a-z0-9-]*)?', name) or len(status) != 3:
+            raise Failure('SHARED_STACK_CHANGED', 'Некорректное состояние менеджера пакетов; первый проект не изменён.')
+        if status[1] in ('c', 'n'):
+            continue
+        if not re.fullmatch(r'[0-9A-Za-z.+:~_-]+', version):
+            raise Failure('SHARED_STACK_CHANGED', 'Некорректная версия установленного пакета.')
+        if status[1] == 'i' and status[2] == ' ' and status[0] in ('i', 'h'):
+            if name in installed:
+                raise Failure('SHARED_STACK_CHANGED', 'Неоднозначный список установленных пакетов.')
+            installed[name] = version
+        elif status[1] not in ('c', 'n'):
+            raise Failure('SHARED_PACKAGE_CHANGE_REQUIRED', 'На сервере есть незавершённая настройка пакетов. Завершите её отдельно, затем повторите установку второго проекта.')
+    return installed
+
+
+def frozen_package_preferences(installed):
+    records = []
+    for name, version in sorted(installed.items()):
+        if not re.fullmatch(r'[a-z0-9][a-z0-9+.-]*(?::[a-z0-9][a-z0-9-]*)?', name) \
+                or not re.fullmatch(r'[0-9A-Za-z.+:~_-]+', version):
+            raise Failure('SHARED_STACK_CHANGED', 'Невозможно закрепить версии общих пакетов.')
+        records.append(f'Package: {name}\nPin: version {version}\nPin-Priority: 1001\n\n'
+                       f'Package: {name}\nPin: version ?*\nPin-Priority: -1\n\n')
+    return ''.join(records).encode('ascii')
+
+
+@contextmanager
+def shared_package_pins(installed):
+    """Freeze existing packages for these commands without changing APT config."""
+    if STATE.resolve() != STATE:
+        raise Failure('UNSAFE_PATH', 'Небезопасный каталог состояния установщика.')
+    info = STATE.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        raise Failure('UNSAFE_PATH', 'Каталог состояния должен принадлежать root без права посторонней записи.')
+    descriptor, name = tempfile.mkstemp(prefix='.shared-apt-', dir=STATE)
+    path = Path(name)
+    fragments = path.with_name(path.name + '.parts')
+    try:
+        with os.fdopen(descriptor, 'wb') as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            os.fchown(stream.fileno(), 0, 0)
+            stream.write(frozen_package_preferences(installed))
+            stream.flush(); os.fsync(stream.fileno())
+        fragments.mkdir(mode=0o700)
+        yield ['-o', 'Dir::Etc::preferences=' + str(path),
+               '-o', 'Dir::Etc::preferencesparts=' + str(fragments),
+               '-o', 'APT::Get::allow-downgrades=false',
+               '-o', 'APT::Get::allow-remove-essential=false',
+               '-o', 'APT::Get::allow-change-held-packages=false']
+    finally:
+        # These exact names were created above; no shared preferences are touched.
+        if fragments.exists() and not fragments.is_symlink():
+            fragments.rmdir()
+        path.unlink(missing_ok=True)
+
+
+def validate_shared_package_plan(plan, installed):
+    existing = set(installed) | {name.split(':', 1)[0] for name in installed}
+    for line in plan.decode('utf-8').splitlines():
+        if line.startswith(('Remv ', 'Purg ')):
+            raise Failure('SHARED_PACKAGE_CHANGE_REQUIRED', 'Зависимости второго проекта требуют изменения пакетов первого. Автоматическая установка остановлена; выполните обслуживание отдельно.')
+        if line.startswith(('Inst ', 'Conf ')):
+            fields = line.split()
+            if len(fields) < 3 or fields[1] in existing or fields[1].split(':', 1)[0] in existing or '[' in fields[2] \
+                    or fields[1].split(':', 1)[0].startswith(('php', 'nginx', 'mysql', 'mariadb', 'apache2')):
+                raise Failure('SHARED_PACKAGE_CHANGE_REQUIRED', 'Зависимости второго проекта требуют изменения пакетов первого. Автоматическая установка остановлена; выполните обслуживание отдельно.')
+
+
+def add_shared_packages(missing, installed):
+    # Installing a previously absent PHP module can itself restart FPM from
+    # postinst. A completed older installation needs a separate maintenance
+    # step for these; new installers prepare the same complete package set.
+    protected = {'nginx', 'mysql-server', 'php8.3-fpm', 'php8.3-cli', 'php8.3-mysql',
+                 'php8.3-curl', 'php8.3-mbstring'}
+    if protected.intersection(missing):
+        raise Failure('SHARED_PACKAGE_CHANGE_REQUIRED', 'Первой установке не хватает общих web/PHP/MySQL-пакетов. Их настройка может перезапустить службы; выполните обслуживание отдельно либо используйте оба установщика rc.6 или новее.')
+    wait_package_locks()
+    apt = ['apt-get', '-o', 'DPkg::Lock::Timeout=120',
+           '-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold']
+    run(apt + ['update', '-qq'], timeout=600, safe='Не удалось обновить список пакетов Ubuntu. Повторите --resume.')
+    with shared_package_pins(installed) as pins:
+        command = apt + pins + ['install', '--no-upgrade', '--no-remove', *missing]
+        plan = run(command + ['--simulate'], timeout=120,
+                   safe='Зависимости требуют отдельного обслуживания сервера. Пакеты первого проекта не изменены.')
+        validate_shared_package_plan(plan, installed)
+        if shared_package_inventory() != installed:
+            raise Failure('SHARED_STACK_CHANGED', 'Список пакетов изменился во время проверки. Повторите установку после завершения других операций APT.')
+        run(command + ['-y', '-qq'], timeout=1200,
+            safe='Не удалось добавить безопасные зависимости второго проекта. Пакеты первого проекта закреплены; повторите --resume.')
 
 
 def directory(path, mode=0o750, owner=None):
@@ -268,7 +440,7 @@ def detect_ip():
     return found.pop()
 
 
-def preflight(resume=False):
+def preflight(resume=False, *, host=None, ip=None, explicit_host=True):
     if os.geteuid() != 0:
         raise Failure('ROOT_REQUIRED', 'Запустите установщик через sudo.')
     values = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
@@ -282,10 +454,17 @@ def preflight(resume=False):
     node_archive()
     marker = read_json(STATE / 'bootstrap.json')
     if resume:
-        if not marker or marker.get('installer') != 'gitreposted-clean-v1' or (STATE / 'installed.json').exists():
+        if not isinstance(marker, dict) or marker.get('installer') != 'gitreposted-clean-v1' or (STATE / 'installed.json').exists():
             raise Failure('RESUME_UNAVAILABLE', 'Нет незавершённой установки для продолжения.')
-        return
-    for path in (INSTALL, APP, STATE, DATA, CONFIG.parent, LOG, SITE, NODE_ROOT):
+        shared_host = marker.get('shared_host', False)
+        if type(shared_host) is not bool:
+            raise Failure('STATE_CONFLICT', 'Некорректный режим совместной установки.')
+        if shared_host and peer_installation(ip) is None:
+            raise Failure('PEER_MISSING', 'Первый проект больше не подтверждён. Восстановите его до продолжения второго.')
+        if host:
+            ensure_hosts_available({'host': host, 'public_ip': ip})
+        return shared_host
+    for path in (INSTALL, APP, STATE, DATA, CONFIG.parent, LOG, SITE, ENABLED_SITE, NODE_ROOT):
         if path.exists() or path.is_symlink():
             raise Failure('EXISTING_INSTALLATION', 'Обнаружены существующие каталоги GitRePosted. Нужен чистый сервер.')
     for name in (APP_USER, SETUP_USER):
@@ -294,10 +473,17 @@ def preflight(resume=False):
         except KeyError:
             continue
         raise Failure('EXISTING_USER', 'Системный пользователь GitRePosted уже существует.')
-    for service in ('nginx', 'apache2', 'mysql', 'mariadb'):
+    peer = peer_installation(ip)
+    if peer and (not explicit_host or not host or host == ip):
+        raise Failure('SECOND_HOST_REQUIRED', 'Для второго проекта нужен отдельный домен или поддомен. Направьте его на сервер и добавьте --host example.org.')
+    if host:
+        ensure_hosts_available({'host': host, 'public_ip': ip})
+    if peer:
+        verify_passive_apache_stub()
+    for service in (('mariadb',) if peer else ('nginx', 'apache2', 'mysql', 'mariadb')):
         if shutil.which(service) or Path('/etc/' + service).exists():
             raise Failure('EXISTING_SERVICE', 'На сервере уже есть web-сервер или MySQL. Автоматическая установка остановлена.')
-    for port in (80, 443, 3010, 3306):
+    for port in ((3010,) if peer else (80, 443, 3010, 3306)):
         for af, addr in ((socket.AF_INET, '0.0.0.0'), (socket.AF_INET6, '::')):
             try:
                 with socket.socket(af, socket.SOCK_STREAM) as sock:
@@ -308,6 +494,7 @@ def preflight(resume=False):
             except OSError as error:
                 if error.errno not in (97, 99):
                     raise Failure('PORT_BUSY', 'Порты 80, 443, 3010 или 3306 заняты. Нужен чистый сервер.') from None
+    return peer is not None
 
 
 def validate_source(source):
@@ -537,7 +724,7 @@ def publish_initial_state(source, target):
         raise Failure('STATE_UNAVAILABLE', 'Не удалось сохранить начальное состояние установки.')
 
 
-def initialize_state(ip, host):
+def initialize_state(ip, host, shared_host=False):
     """Publish marker and lock together, so every visible state can resume.
 
     A killed process before publication may leave an unpublished private
@@ -548,7 +735,8 @@ def initialize_state(ip, host):
     temporary = STATE.parent / ('.' + STATE.name + '-initial.' + secrets.token_hex(8))
     temporary.mkdir(mode=0o700)
     try:
-        save_json(temporary / 'bootstrap.json', {'installer': 'gitreposted-clean-v1', 'public_ip': ip, 'host': host})
+        save_json(temporary / 'bootstrap.json', {'installer': 'gitreposted-clean-v1', 'public_ip': ip, 'host': host,
+                                                 'shared_host': shared_host})
         descriptor = os.open(temporary / 'installer.lock', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
             os.fsync(descriptor)
@@ -599,6 +787,19 @@ def cert_name(host):
 
 
 def obtain_certificate(host, ip, email=''):
+    with shared_lock():
+        public = read_json(STATE / 'public.json', {})
+        if not isinstance(public, dict):
+            raise Failure('STATE_CONFLICT', 'Некорректное состояние HTTPS этой установки.')
+        ensure_hosts_available({**public, 'host': public.get('host', host), 'pending_host': host, 'public_ip': ip})
+        if public.get('host') and host not in [public['host'], public.get('site_host'), *public.get('acme_hosts', [])]:
+            # A second named vhost cannot depend on the first site's default
+            # ACME root. Broker state reserves this candidate before the call.
+            configure_nginx({**public, 'pending_host': host})
+        return _obtain_certificate(host, ip, email)
+
+
+def _obtain_certificate(host, ip, email=''):
     dns_matches(host, ip)
     args = [CERTBOT, 'certonly', '--webroot', '--webroot-path', ACME, '--cert-name', cert_name(host),
             '--non-interactive', '--agree-tos', '--keep-until-expiring', '--preferred-challenges', 'http',
@@ -612,11 +813,55 @@ def obtain_certificate(host, ip, email=''):
     run(args, timeout=300, safe='Не удалось получить TLS-сертификат. Проверьте DNS, доступность 80/443 и ограничения ACME; затем продолжите через --resume.')
 
 
+def renewal_config_exists(host):
+    path = RENEWAL_DIR / (cert_name(host) + '.conf')
+    if not path.exists() and not path.is_symlink():
+        return False
+    try:
+        coinstall._parents(path.parent)
+    except coinstall.CoInstallError as error:
+        raise Failure(error.code, str(error)) from None
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or info.st_nlink != 1:
+        raise Failure('UNSAFE_PATH', 'Небезопасный файл настроек продления сертификата.')
+    return True
+
+
+def renew_certificates():
+    """Renew only this installation's certificates under the common lease."""
+    if os.geteuid() != 0:
+        raise Failure('ROOT_REQUIRED', 'Продление сертификатов требует root.')
+    with shared_lock():
+        public = read_json(STATE / 'public.json', {})
+        if not isinstance(public, dict) or public.get('tls_ready') is not True:
+            raise Failure('TLS_NOT_READY', 'HTTPS этой установки ещё не настроен.')
+        ensure_hosts_available(public)
+        hosts = list(dict.fromkeys([host_name(public['host']),
+                                   host_name(public.get('site_host', public['host'])),
+                                   *[host_name(host) for host in public.get('acme_hosts', [])]]))
+        for host in hosts:
+            if not renewal_config_exists(host):
+                if host in {public['host'], public.get('site_host', public['host'])}:
+                    raise Failure('TLS_STATE', 'Отсутствует настройка продления действующего HTTPS-адреса. Проверьте сертификаты этой установки.')
+                continue  # A reserved candidate may never have passed issuance.
+            run([CERTBOT, 'renew', '--quiet', '--no-random-sleep-on-renew', '--cert-name', cert_name(host),
+                 '--deploy-hook', 'systemctl reload nginx'], timeout=600,
+                safe='Не удалось продлить сертификат этой установки. Проверьте DNS доменов и доступность HTTP.')
+
+
 def nginx_content(public):
     base_host = host_name(public['host'])
     site_host = host_name(public.get('site_host', base_host))
     installed = public.get('installed', False)
     tls_ready = public.get('tls_ready', False)
+    shared_host = public.get('shared_host', False)
+    if type(shared_host) is not bool:
+        raise Failure('STATE_CONFLICT', 'Некорректный режим совместной установки.')
+    aliases = public.get('acme_hosts', [])
+    if not isinstance(aliases, list) or len(aliases) > 32:
+        raise Failure('STATE_CONFLICT', 'Некорректный список доменов установки.')
+    http_hosts = list(dict.fromkeys([base_host, site_host, *[host_name(host) for host in aliases]] +
+                                   ([host_name(public['pending_host'])] if public.get('pending_host') else [])))
     acme = f'location ^~ /.well-known/acme-challenge/ {{ root {ACME}; default_type text/plain; }}'
     status_location = f'location = /install/api.php {{ client_max_body_size 64k; include fastcgi_params; fastcgi_param HTTPS on; fastcgi_param SCRIPT_FILENAME {INSTALL}/web/api.php; fastcgi_read_timeout 50s; fastcgi_pass unix:/run/php/gitreposted-installer.sock; }}'
     wizard = (status_location + '\nlocation = /install { return 404; }\nlocation /install/ { return 404; }' if installed else f'''
@@ -650,8 +895,8 @@ location / {{ {proxy} }}'''
 {private}
 location / {{ return 302 /install/; }}'''
     http = f'''server {{
-listen 80 default_server;
-server_name _;
+listen 80{'' if shared_host else ' default_server'};
+server_name {' '.join(http_hosts)};
 {acme}
 location / {{ {'return 302 https://' + base_host + '/install/;' if tls_ready and not installed else 'return 301 https://' + site_host + '$request_uri;' if tls_ready else 'default_type text/plain; return 503 "GitRePosted: HTTPS is being configured. Return to the SSH console.\\n";'} }}
 }}
@@ -662,7 +907,7 @@ location / {{ {'return 302 https://' + base_host + '/install/;' if tls_ready and
     for host in dict.fromkeys([base_host, site_host]):
         body = pending_app if not installed else app if host == site_host else f'location / {{ return 302 https://{site_host}$request_uri; }}'
         servers.append(f'''server {{
-listen 443 ssl {'default_server' if host == base_host else ''};
+listen 443 ssl{' default_server' if host == base_host and not shared_host else ''};
 server_name {host};
 ssl_certificate /etc/letsencrypt/live/{cert_name(host)}/fullchain.pem;
 ssl_certificate_key /etc/letsencrypt/live/{cert_name(host)}/privkey.pem;
@@ -677,20 +922,43 @@ add_header X-Content-Type-Options nosniff always;
 
 
 def configure_nginx(public):
+    with shared_lock():
+        ensure_hosts_available(public)
+        return _configure_nginx(public)
+
+
+def _configure_nginx(public):
+    if SITE.is_symlink() or (SITE.exists() and not SITE.is_file()):
+        raise Failure('UNSAFE_PATH', 'Неожиданная конфигурация nginx.')
     old = SITE.read_bytes() if SITE.exists() else None
-    atomic(SITE, nginx_content(public), 0o644)
-    enabled = Path('/etc/nginx/sites-enabled/gitreposted-installer')
-    if not enabled.exists():
-        if enabled.is_symlink():
-            raise Failure('UNSAFE_PATH', 'Неожиданная конфигурация nginx.')
-        enabled.symlink_to(SITE)
+    enabled = ENABLED_SITE
+    existed = enabled.exists() or enabled.is_symlink()
+    if existed and (not enabled.is_symlink() or os.readlink(enabled) != str(SITE) or enabled.lstat().st_uid != 0):
+        raise Failure('UNSAFE_PATH', 'Неожиданная ссылка сайта nginx.')
+    reload_attempted = False
     try:
+        atomic(SITE, nginx_content(public), 0o644)
+        if not existed:
+            enabled.symlink_to(SITE)
         run(['nginx', '-t'], safe='Новая конфигурация nginx не прошла проверку.')
+        reload_attempted = True
         run(['systemctl', 'reload', 'nginx'])
-    except Failure:
-        if old is not None:
-            atomic(SITE, old, 0o644)
-        raise
+    except (Failure, OSError) as error:
+        try:
+            if old is not None:
+                atomic(SITE, old, 0o644)
+            else:
+                SITE.unlink(missing_ok=True)
+            if not existed and enabled.is_symlink() and os.readlink(enabled) == str(SITE):
+                enabled.unlink()
+            if reload_attempted:
+                run(['nginx', '-t'], safe='Прежняя конфигурация nginx не прошла проверку.')
+                run(['systemctl', 'reload', 'nginx'], safe='Не удалось вернуть прежнюю конфигурацию nginx.')
+        except (Failure, OSError):
+            raise Failure('NGINX_ROLLBACK_FAILED', 'Не удалось подтвердить возврат прежней конфигурации nginx. Проверьте nginx -t и состояние службы.') from None
+        if isinstance(error, Failure):
+            raise
+        raise Failure('NGINX_CONFIGURATION_FAILED', 'Не удалось сохранить конфигурацию nginx; прежние настройки возвращены.') from None
 
 
 def units():
@@ -715,7 +983,7 @@ WantedBy=multi-user.target
 Description=Renew GitRePosted TLS certificates
 [Service]
 Type=oneshot
-ExecStart={CERTBOT} renew --quiet --deploy-hook "systemctl reload nginx"
+ExecStart=/usr/bin/python3 -B {INSTALL}/lib/provision.py --renew-certificates
 ''', 0o644)
     atomic('/etc/systemd/system/gitreposted-cert-renew.timer', '''[Unit]
 Description=Check GitRePosted certificate renewal twice daily
@@ -786,7 +1054,7 @@ WantedBy=timers.target
 ''', 0o644)
 
 
-def pools():
+def pools(shared_host=False):
     for name, user, script_root, session_dir, timeout in (
         ('gitreposted-installer', SETUP_USER, f'{INSTALL}:{STATE}:/tmp', STATE / 'sessions', 60),):
         atomic(f'/etc/php/8.3/fpm/pool.d/{name}.conf', f'''[{name}]
@@ -819,7 +1087,7 @@ php_admin_value[opcache.revalidate_freq] = 0
 php_admin_flag[expose_php] = off
 ''', 0o644)
     run(['php-fpm8.3', '-t'], safe='Конфигурация PHP-FPM не прошла проверку.')
-    run(['systemctl', 'restart', 'php8.3-fpm'])
+    run(['systemctl', 'reload' if shared_host else 'restart', 'php8.3-fpm'])
 
 
 @contextmanager
@@ -1317,16 +1585,21 @@ def select_application_release(release, resume=False):
 
 def install(source, ip, host, resume=False, checked=False, package=None):
     if not checked:
-        preflight(resume)
+        shared_host = preflight(resume, host=host, ip=ip)
+    else:
+        shared_host = read_json(STATE / 'bootstrap.json', {}).get('shared_host', False)
+    if type(shared_host) is not bool:
+        raise Failure('STATE_CONFLICT', 'Некорректный режим совместной установки.')
     dns_matches(host, ip)
     files = package_files(source) if package is None else package
     print('Preflight passed. Installing GitRePosted dependencies...', flush=True)
     directory(STATE, 0o700)
-    save_json(STATE / 'bootstrap.json', {'installer': 'gitreposted-clean-v1', 'public_ip': ip, 'host': host})
+    save_json(STATE / 'bootstrap.json', {'installer': 'gitreposted-clean-v1', 'public_ip': ip, 'host': host,
+                                         'shared_host': shared_host})
     # The curl loader removes its temporary archive on every exit. Persist a
     # complete root-owned resume entry point before apt/network operations.
     persist_bundle(source, files)
-    prepare_system_packages(resume)
+    prepare_system_packages(resume, shared_host)
     mysql_version = run(['mysql', '-NBe', 'SELECT VERSION()']).decode().strip()
     if not mysql_version.startswith('8.0.') or 'MariaDB' in mysql_version:
         raise Failure('MYSQL_VERSION', 'Нужен MySQL 8.0. Установка остановлена.')
@@ -1354,15 +1627,16 @@ def install(source, ip, host, resume=False, checked=False, package=None):
         run(['python3', '-m', 'venv', certbot_venv], timeout=120)
     run([certbot_venv / 'bin/pip', 'install', '--disable-pip-version-check', 'certbot==5.8.0'], timeout=600,
         safe='Не удалось установить Certbot 5.8.0.')
-    pools()
+    pools(shared_host)
     units()
     default = Path('/etc/nginx/sites-enabled/default')
-    if default.is_symlink() and os.readlink(default) == '/etc/nginx/sites-available/default':
+    if not shared_host and default.is_symlink() and os.readlink(default) == '/etc/nginx/sites-available/default':
         default.unlink()  # Preflight guaranteed nginx did not exist before this installer.
     directory(ACME, 0o755)
     public = read_json(STATE / 'public.json', {})
     public.update({'version': VERSION, 'public_ip': ip, 'host': host, 'base_url': 'https://' + host,
                    'site_host': host, 'site_url': 'https://' + host, 'allowed_hosts': [host],
+                   'shared_host': shared_host,
                    'tls_ready': False, 'installed': False, 'job': {'status': 'idle', 'steps': []}})
     save_json(STATE / 'public.json', public, True)
     configure_nginx(public)
@@ -1384,37 +1658,60 @@ def main():
     parser.add_argument('--host', help='Optional domain already pointing to this public IP')
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--renew-certificates', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
-        if not args.dry_run and ((STATE / 'installed.json').exists() or (STATE / 'installed.json').is_symlink()):
-            if os.geteuid() != 0:
-                raise Failure('ROOT_REQUIRED', 'Запустите установщик через sudo.')
-            with installer_lock():
-                reconcile_installed()
-                public = read_json(STATE / 'public.json', {})
-                print('GitRePosted is already installed: ' + public['admin_url'])
+        if os.geteuid() != 0:
+            raise Failure('ROOT_REQUIRED', 'Запустите установщик через sudo.')
+        if args.renew_certificates:
+            if args.host or args.public_ip or args.resume or args.dry_run:
+                raise Failure('INVALID_ARGUMENTS', 'Продление сертификатов нельзя совмещать с установкой.')
+            renew_certificates()
             return
-        saved = read_json(STATE / 'public.json', {}) if args.resume else {}
-        if args.resume and not saved:
-            saved = read_json(STATE / 'bootstrap.json', {})
-        ip = public_ip(args.public_ip) if args.public_ip else public_ip(saved['public_ip']) if saved.get('public_ip') else detect_ip()
-        host = host_name(args.host) if args.host else host_name(saved['host']) if saved.get('host') else ip
-        preflight(args.resume)
-        dns_matches(host, ip)
         if args.dry_run:
-            print(json.dumps({'ok': True, 'public_ip': ip, 'host': host, 'ubuntu': '24.04', 'writes': False}))
+            # A read-only audit must not create even the common lock file.
+            with shared_lock(create=False):
+                ip, host = install_target(args)
+                shared_host = preflight(args.resume, host=host, ip=ip, explicit_host=bool(args.host) or args.resume)
+                dns_matches(host, ip)
+                print(json.dumps({'ok': True, 'public_ip': ip, 'host': host, 'ubuntu': '24.04',
+                                  'shared_host': shared_host, 'writes': False}))
             return
-        source = Path(__file__).resolve().parents[1]
-        files = package_files(source)
-        if not STATE.exists():
-            initialize_state(ip, host)
-        with installer_lock():
-            if args.resume and resume_ready():
+        # Only the two trusted installers share this lock. It is nonblocking:
+        # another bootstrap/broker job returns a safe BUSY instead of racing
+        # apt, nginx or a domain claim. No lease remains while filling the UI.
+        with shared_lock():
+            if not args.dry_run and ((STATE / 'installed.json').exists() or (STATE / 'installed.json').is_symlink()):
+                if os.geteuid() != 0:
+                    raise Failure('ROOT_REQUIRED', 'Запустите установщик через sudo.')
+                with installer_lock():
+                    reconcile_installed()
+                    public = read_json(STATE / 'public.json', {})
+                    print('GitRePosted is already installed: ' + public['admin_url'])
                 return
-            install(source, ip, host, args.resume, checked=True, package=files)
+            ip, host = install_target(args)
+            shared_host = preflight(args.resume, host=host, ip=ip, explicit_host=bool(args.host) or args.resume)
+            dns_matches(host, ip)
+            source = Path(__file__).resolve().parents[1]
+            files = package_files(source)
+            if not STATE.exists():
+                initialize_state(ip, host, shared_host is True)
+            with installer_lock():
+                if args.resume and resume_ready():
+                    return
+                install(source, ip, host, args.resume, checked=True, package=files)
     except Failure as error:
         print(error.code + ': ' + str(error), file=sys.stderr)
         sys.exit(1)
+
+
+def install_target(args):
+    saved = read_json(STATE / 'public.json', {}) if args.resume else {}
+    if args.resume and not saved:
+        saved = read_json(STATE / 'bootstrap.json', {})
+    ip = public_ip(args.public_ip) if args.public_ip else public_ip(saved['public_ip']) if saved.get('public_ip') else detect_ip()
+    host = host_name(args.host) if args.host else host_name(saved['host']) if saved.get('host') else ip
+    return ip, host
 
 
 if __name__ == '__main__':

@@ -56,6 +56,8 @@ class BrokerTests(unittest.TestCase):
                         mock.patch.object(p, "save_json", side_effect=self.save_json),
                         mock.patch.object(p, "php_password", return_value="hashed-fixture-password"),
                         mock.patch.object(p, "installer_lock", side_effect=lambda: nullcontext()),
+                        mock.patch.object(p, "shared_lock", side_effect=lambda: nullcontext()),
+                        mock.patch.object(p, "ensure_hosts_available"),
                         mock.patch.object(p, "identity", return_value=(1001, 1001))]
         if not hasattr(os, "O_NOFOLLOW"):
             self.patches.append(mock.patch.object(os, "O_NOFOLLOW", 0, create=True))

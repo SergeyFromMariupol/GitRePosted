@@ -7,6 +7,11 @@ passed a clean-server or real-provider test unless docs/TESTING.md records it.
 - Application code lives in payload/src/. The Node entrypoint is server.js;
   src/ contains ESM modules and public/ contains the active UI.
 - bootstrap.sh and lib/provision.py prepare an isolated installation.
+- lib/coinstall.py is identical in both projects. It verifies the completed
+  sibling installation, reserves distinct hosts and serializes shared changes.
+  Support both installation orders without adopting arbitrary existing sites
+  or upgrading the sibling's packages. Keep databases, data, users, services and
+  bot tokens separate. The second project requires its own DNS hostname.
   lib/broker.py owns privileged actions; bin/application.php is its bounded
   child for provider checks and the Node schema CLI. PHP is not the bot runtime.
 - Never put real configuration, tokens, keys, database exports, messages,

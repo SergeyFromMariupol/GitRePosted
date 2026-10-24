@@ -150,7 +150,7 @@ class ProvisionTests(unittest.TestCase):
     def test_installed_main_repairs_before_detection_or_preflight(self):
         with tempfile.TemporaryDirectory()as temporary,patch.object(module,'STATE',Path(temporary)),\
              patch.object(module.sys,'argv',['provision.py','--resume']),patch.object(module.os,'geteuid',return_value=0,create=True),\
-             patch.object(module,'installer_lock',contextlib.nullcontext),patch.object(module,'reconcile_installed',return_value=True)as repair,\
+             patch.object(module,'installer_lock',contextlib.nullcontext),patch.object(module,'shared_lock',contextlib.nullcontext),patch.object(module,'reconcile_installed',return_value=True)as repair,\
              patch.object(module,'read_json',return_value={'admin_url':'https://example.com/control/'}),\
              patch.object(module,'detect_ip')as detect,patch.object(module,'preflight')as preflight,contextlib.redirect_stdout(io.StringIO())as output:
             (Path(temporary)/'installed.json').write_text('{}');module.main()

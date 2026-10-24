@@ -24,13 +24,14 @@ EXPORT_MARKER = ".gitreposted-export.json"
 # Explicit names only. Never copy a private snapshot recursively.
 INSTALLER_FILES = (
     "bootstrap.sh", "README.md", "AGENTS.md", "LICENSE", "VERSION", ".gitignore", ".gitattributes",
-    "bin/application.php", "bin/cleanup.py", "lib/broker.py", "lib/provision.py", "lib/Wizard.php",
+    "bin/application.php", "bin/cleanup.py", "lib/broker.py", "lib/provision.py", "lib/coinstall.py", "lib/Wizard.php",
     "web/api.php", "web/index.php", "web/assets/wizard.js", "web/assets/wizard.css",
     "scripts/build.py", "scripts/export.py", "scripts/release-loader.sh", "tests/package_test.py",
     "docs/INSTALLATION.md", "docs/CONFIGURATION.md", "docs/OPERATIONS.md", "docs/SECURITY.md",
     "docs/TESTING.md", "docs/RELEASING.md",
 )
 OPTIONAL_INSTALLER_FILES = (
+    "tests/coinstall-test.py", "tests/coinstall-provision-test.py", "tests/coinstall-broker-test.py",
     "tests/application-test.php", "tests/broker-node-test.py", "tests/wizard-node-test.php",
     "tests/wizard-node-ui.test.cjs", "tests/provision-test.py", "tests/provision-audit-test.py",
     "tests/provision-node-test.py",

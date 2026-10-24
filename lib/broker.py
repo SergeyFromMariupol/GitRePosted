@@ -47,6 +47,19 @@ def token(platform, value):
     return value
 
 
+def host_aliases(public, extra=None):
+    aliases = public.get('acme_hosts', [])
+    if not isinstance(aliases, list):
+        failure('INVALID_HOST', 'Не удалось проверить ранее подключённые домены.')
+    values = [public['host'], public.get('site_host', public['host']), *aliases]
+    if extra is not None:
+        values.append(extra)
+    result = list(dict.fromkeys(p.host_name(host) for host in values))
+    if len(result) > 32:
+        failure('HOST_LIMIT', 'Достигнут предел 32 адресов сертификатов этой установки.')
+    return result
+
+
 def settings(value):
     if not isinstance(value, dict) or set(value) - {'admin', 'telegram', 'max', 'timezone', 'support_username', 'hcaptcha', 'mtproto'}:
         failure('INVALID_SETTINGS', 'Некорректные настройки установки.')
@@ -305,11 +318,17 @@ class Broker:
 
     def prepare_job(self, action, value):
         fd = os.open(p.STATE / 'installer.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        suite_lock = None
+        suite_locked = False
         try:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
                 failure('BUSY', 'Операция установщика уже выполняется.')
+            suite_lock = p.shared_lock()
+            suite_lock.__enter__()
+            suite_locked = True
+            p.ensure_hosts_available(self.public)
             # Load once under the same interprocess lock used by SSH link reissue.
             self.private = p.read_json(p.STATE / 'private.json', {})
             if action in ('start', 'host', 'retry', 'revise'):
@@ -371,6 +390,8 @@ class Broker:
                             failure('INVALID_SETTINGS', 'Некорректный email для сертификата.')
                         if host == self.public['public_ip']:
                             failure('INVALID_HOST', 'Укажите домен, направленный на сервер.')
+                        p.ensure_hosts_available({**self.public, 'pending_host': host,
+                                                  'acme_hosts': host_aliases(self.public, host)})
                         self.private['host_settings'] = {'host': host, 'email': email}
                         ids = [('dns', 'Проверка DNS домена'), ('certificate', 'Получение сертификата'), ('nginx', 'Подключение домена')]
                     self.public['job'] = {'id': secrets.token_hex(12), 'type': 'install' if action == 'start' else 'host',
@@ -379,6 +400,10 @@ class Broker:
                 self.public['job']['error'] = None
                 try:
                     self.save()
+                    # Publish the pending hostname before the sibling can claim it;
+                    # the worker acquires its own thread-local suite lease.
+                    suite_lock.__exit__(None, None, None)
+                    suite_locked = False
                     threading.Thread(target=self.execute, args=(fd,), daemon=True).start()
                 except BaseException:
                     # A failed projection write or worker launch must never leave a running
@@ -401,11 +426,19 @@ class Broker:
                 fd = None  # Worker owns the open file description until job completion.
                 return {'job': self.public['job']}
         finally:
+            if suite_locked:
+                suite_lock.__exit__(None, None, None)
             if fd is not None:
                 os.close(fd)
 
     def execute(self, fd):
+        suite_lock = None
+        suite_locked = False
         try:
+            suite_lock = p.shared_lock()
+            suite_lock.__enter__()
+            suite_locked = True
+            p.ensure_hosts_available(self.public)
             job = self.public['job']
             for step in job['steps']:
                 if step['status'] in ('done', 'skipped'):
@@ -443,8 +476,12 @@ class Broker:
                     # path. The temporary root socket must still be retired.
                     retire_installer(stop=True)
             finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+                try:
+                    if suite_locked:
+                        suite_lock.__exit__(None, None, None)
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    os.close(fd)
 
     def write_config(self, config):
         selected = self.private['settings']
@@ -571,11 +608,19 @@ class Broker:
         host, ip = settings['host'], self.public['public_ip']
         if step == 'dns':
             p.dns_matches(host, ip)
+            self.public['acme_hosts'] = host_aliases(self.public, host)
+            self.save()
         elif step == 'certificate':
+            self.public['acme_hosts'] = host_aliases(self.public, host)
+            self.save()
+            # A named shared-host vhost must own HTTP-01 before TLS issuance.
+            p.configure_nginx({**self.public, 'pending_host': host})
             p.obtain_certificate(host, ip, settings['email'])
         elif step == 'nginx':
             candidate = {**self.public, 'site_host': host, 'site_url': 'https://' + host,
+                         'acme_hosts': host_aliases(self.public, host),
                          'allowed_hosts': list(dict.fromkeys([self.public['host'], host]))}
+            candidate.pop('pending_host', None)
             p.configure_nginx(candidate)
             self.public.update(candidate)
 
