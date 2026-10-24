@@ -78,9 +78,9 @@ class ProvisionTests(unittest.TestCase):
         with self.assertRaises(module.Failure):module.nginx_content(public)
 
     def test_command_failure_never_includes_stderr_or_stdin(self):
-        response=types.SimpleNamespace(returncode=1,stdin=None,stdout=None,stderr=None,
+        response=types.SimpleNamespace(pid=424242,returncode=1,stdin=None,stdout=None,stderr=None,
             communicate=lambda **_: (b'',b'private-token-in-stderr'),poll=lambda:1)
-        with patch.object(module.subprocess,'Popen',return_value=response):
+        with patch.object(module.subprocess,'Popen',return_value=response), patch.object(module.os,'killpg',create=True):
             with self.assertRaises(module.Failure) as caught:module.run(['fake'],data=b'private-password',safe='Safe failure')
         self.assertEqual('Safe failure',str(caught.exception))
         self.assertNotIn('private',str(caught.exception))

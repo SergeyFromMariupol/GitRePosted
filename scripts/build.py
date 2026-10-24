@@ -32,6 +32,7 @@ INSTALLER_FILES = (
 )
 OPTIONAL_INSTALLER_FILES = (
     "tests/coinstall-test.py", "tests/coinstall-provision-test.py", "tests/coinstall-broker-test.py",
+    "tests/deep-coinstall-packages-test.py", "tests/deep-coinstall-nginx-test.py", "tests/deep-coinstall-state-test.cjs",
     "tests/application-test.php", "tests/broker-node-test.py", "tests/wizard-node-test.php",
     "tests/wizard-node-ui.test.cjs", "tests/provision-test.py", "tests/provision-audit-test.py",
     "tests/provision-node-test.py",

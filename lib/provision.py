@@ -28,7 +28,7 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
-VERSION = '0.1.0-rc.6'
+VERSION = '0.1.0-rc.7'
 INSTALL = Path('/opt/gitreposted-installer')
 APP = Path('/opt/gitreposted')
 STATE = Path('/var/lib/gitreposted-installer')
@@ -60,6 +60,11 @@ class Failure(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+class BootstrapInterrupted(BaseException):
+    """CLI cancellation must bypass normal validation, retries and remapping."""
+    code = 'BOOTSTRAP_INTERRUPTED'
 
 
 _coinstall_spec = importlib.util.spec_from_file_location('gitreposted_coinstall', Path(__file__).with_name('coinstall.py'))
@@ -117,14 +122,17 @@ def verify_passive_apache_stub():
 def run(argv, *, data=None, timeout=120, safe='Команда системы не выполнена.', capture=True, cwd=None):
     """Never include stdin, raw stderr or argv in raised errors."""
     child = None
+    communicated = False
     try:
         child = subprocess.Popen([str(x) for x in argv], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE if capture else None, stderr=subprocess.PIPE if capture else None,
                                  start_new_session=True,
                                  cwd=cwd,
-                                 env={**os.environ, 'DEBIAN_FRONTEND': 'noninteractive', 'LC_ALL': 'C.UTF-8'})
+                                 env={**os.environ, 'DEBIAN_FRONTEND': 'noninteractive',
+                                      'LC_ALL': 'C.UTF-8', 'NEEDRESTART_MODE': 'l'})
         try:
             output, _ = child.communicate(input=data, timeout=timeout)
+            communicated = True
         except subprocess.TimeoutExpired:
             # runuser/npm/apt can have descendants. Stop the complete private
             # operation before stage cleanup or a resumable job can begin.
@@ -138,11 +146,12 @@ def run(argv, *, data=None, timeout=120, safe='Команда системы н�
         raise Failure('SYSTEM_COMMAND_FAILED', safe) from None
     finally:
         if child is not None:
-            if child.poll() is None:
+            if not communicated or child.returncode:
                 try:
                     os.killpg(child.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+            if child.poll() is None:
                 try:
                     child.wait(timeout=5)
                 except subprocess.TimeoutExpired:
@@ -341,7 +350,7 @@ def add_shared_packages(missing, installed):
         if shared_package_inventory() != installed:
             raise Failure('SHARED_STACK_CHANGED', 'Список пакетов изменился во время проверки. Повторите установку после завершения других операций APT.')
         run(command + ['-y', '-qq'], timeout=1200,
-            safe='Не удалось добавить безопасные зависимости второго проекта. Пакеты первого проекта закреплены; повторите --resume.')
+            safe='Не удалось добавить зависимости второго проекта. Повторите --resume для проверки; незавершённую настройку APT/dpkg потребуется завершить отдельным обслуживанием.')
 
 
 def directory(path, mode=0o750, owner=None):
@@ -839,14 +848,26 @@ def renew_certificates():
         hosts = list(dict.fromkeys([host_name(public['host']),
                                    host_name(public.get('site_host', public['host'])),
                                    *[host_name(host) for host in public.get('acme_hosts', [])]]))
+        failed = []
         for host in hosts:
-            if not renewal_config_exists(host):
-                if host in {public['host'], public.get('site_host', public['host'])}:
-                    raise Failure('TLS_STATE', 'Отсутствует настройка продления действующего HTTPS-адреса. Проверьте сертификаты этой установки.')
-                continue  # A reserved candidate may never have passed issuance.
-            run([CERTBOT, 'renew', '--quiet', '--no-random-sleep-on-renew', '--cert-name', cert_name(host),
-                 '--deploy-hook', 'systemctl reload nginx'], timeout=600,
-                safe='Не удалось продлить сертификат этой установки. Проверьте DNS доменов и доступность HTTP.')
+            try:
+                if not renewal_config_exists(host):
+                    if host in {public['host'], public.get('site_host', public['host'])}:
+                        raise Failure('TLS_STATE', 'Отсутствует настройка продления действующего HTTPS-адреса.')
+                    continue  # A reserved candidate may never have passed issuance.
+                run([CERTBOT, 'renew', '--quiet', '--no-random-sleep-on-renew', '--cert-name', cert_name(host),
+                     '--deploy-hook', 'systemctl reload nginx'], timeout=600,
+                    safe='Не удалось продлить сертификат этой установки.')
+            except Failure as error:
+                # One retired/broken hostname must not starve the current site.
+                # Never execute Certbot for a config whose metadata was rejected.
+                if error.code == 'BOOTSTRAP_INTERRUPTED':
+                    raise  # Explicit CLI cancellation must stop subsequent work.
+                failed.append(error.code)
+        if failed:
+            code = 'UNSAFE_PATH' if any(value in {'UNSAFE_PATH', 'UNTRUSTED_PEER', 'STATE_CONFLICT'} for value in failed) \
+                else 'TLS_STATE' if all(value == 'TLS_STATE' for value in failed) else 'TLS_RENEW_FAILED'
+            raise Failure(code, 'Не все сертификаты удалось проверить или продлить. Остальные допустимые сертификаты обработаны; проверьте настройки HTTPS, DNS и доступность HTTP.')
 
 
 def nginx_content(public):
@@ -1652,6 +1673,35 @@ def install(source, ip, host, resume=False, checked=False, package=None):
     show_link(host, code)
 
 
+@contextmanager
+def interruption_signals():
+    """Unwind CLI package children before releasing a shared host lease."""
+    import threading
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    watched = [signal.SIGTERM]
+    if hasattr(signal, 'SIGHUP'):
+        watched.append(signal.SIGHUP)
+    previous = {number: signal.getsignal(number) for number in watched}
+    interrupted = False
+
+    def interrupted_cli(_number, _frame):
+        nonlocal interrupted
+        if interrupted:
+            return  # Repeated signals must not interrupt process-group cleanup.
+        interrupted = True
+        raise BootstrapInterrupted('Подготовка прервана. После проверки состояния пакетов продолжите установку с --resume.')
+
+    try:
+        for number in watched:
+            signal.signal(number, interrupted_cli)
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
 def main():
     parser = argparse.ArgumentParser(description='GitRePosted clean Ubuntu 24.04 installer')
     parser.add_argument('--public-ip')
@@ -1661,46 +1711,47 @@ def main():
     parser.add_argument('--renew-certificates', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
-        if os.geteuid() != 0:
-            raise Failure('ROOT_REQUIRED', 'Запустите установщик через sudo.')
-        if args.renew_certificates:
-            if args.host or args.public_ip or args.resume or args.dry_run:
-                raise Failure('INVALID_ARGUMENTS', 'Продление сертификатов нельзя совмещать с установкой.')
-            renew_certificates()
-            return
-        if args.dry_run:
-            # A read-only audit must not create even the common lock file.
-            with shared_lock(create=False):
+        with interruption_signals():
+            if os.geteuid() != 0:
+                raise Failure('ROOT_REQUIRED', 'Запустите установщик через sudo.')
+            if args.renew_certificates:
+                if args.host or args.public_ip or args.resume or args.dry_run:
+                    raise Failure('INVALID_ARGUMENTS', 'Продление сертификатов нельзя совмещать с установкой.')
+                renew_certificates()
+                return
+            if args.dry_run:
+                # A read-only audit must not create even the common lock file.
+                with shared_lock(create=False):
+                    ip, host = install_target(args)
+                    shared_host = preflight(args.resume, host=host, ip=ip, explicit_host=bool(args.host) or args.resume)
+                    dns_matches(host, ip)
+                    print(json.dumps({'ok': True, 'public_ip': ip, 'host': host, 'ubuntu': '24.04',
+                                      'shared_host': shared_host, 'writes': False}))
+                return
+            # Only the two trusted installers share this lock. It is nonblocking:
+            # another bootstrap/broker job returns a safe BUSY instead of racing
+            # apt, nginx or a domain claim. No lease remains while filling the UI.
+            with shared_lock():
+                if not args.dry_run and ((STATE / 'installed.json').exists() or (STATE / 'installed.json').is_symlink()):
+                    if os.geteuid() != 0:
+                        raise Failure('ROOT_REQUIRED', 'Запустите установщик через sudo.')
+                    with installer_lock():
+                        reconcile_installed()
+                        public = read_json(STATE / 'public.json', {})
+                        print('GitRePosted is already installed: ' + public['admin_url'])
+                    return
                 ip, host = install_target(args)
                 shared_host = preflight(args.resume, host=host, ip=ip, explicit_host=bool(args.host) or args.resume)
                 dns_matches(host, ip)
-                print(json.dumps({'ok': True, 'public_ip': ip, 'host': host, 'ubuntu': '24.04',
-                                  'shared_host': shared_host, 'writes': False}))
-            return
-        # Only the two trusted installers share this lock. It is nonblocking:
-        # another bootstrap/broker job returns a safe BUSY instead of racing
-        # apt, nginx or a domain claim. No lease remains while filling the UI.
-        with shared_lock():
-            if not args.dry_run and ((STATE / 'installed.json').exists() or (STATE / 'installed.json').is_symlink()):
-                if os.geteuid() != 0:
-                    raise Failure('ROOT_REQUIRED', 'Запустите установщик через sudo.')
+                source = Path(__file__).resolve().parents[1]
+                files = package_files(source)
+                if not STATE.exists():
+                    initialize_state(ip, host, shared_host is True)
                 with installer_lock():
-                    reconcile_installed()
-                    public = read_json(STATE / 'public.json', {})
-                    print('GitRePosted is already installed: ' + public['admin_url'])
-                return
-            ip, host = install_target(args)
-            shared_host = preflight(args.resume, host=host, ip=ip, explicit_host=bool(args.host) or args.resume)
-            dns_matches(host, ip)
-            source = Path(__file__).resolve().parents[1]
-            files = package_files(source)
-            if not STATE.exists():
-                initialize_state(ip, host, shared_host is True)
-            with installer_lock():
-                if args.resume and resume_ready():
-                    return
-                install(source, ip, host, args.resume, checked=True, package=files)
-    except Failure as error:
+                    if args.resume and resume_ready():
+                        return
+                    install(source, ip, host, args.resume, checked=True, package=files)
+    except (Failure, BootstrapInterrupted) as error:
         print(error.code + ': ' + str(error), file=sys.stderr)
         sys.exit(1)
 

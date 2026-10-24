@@ -272,6 +272,13 @@
         if (job.type === 'install' && job.status === 'complete') {
             state.pendingMutation = null; renderJob(job); showScreen('job-screen'); schedulePoll(); return;
         }
+        if (state.pendingMutation && state.pendingMutation.type === 'host' && job.type === 'host' && job.status === 'complete' &&
+            (!job.id || job.id === state.pendingMutation.previousJobId || status.site_host !== state.pendingMutation.host)) {
+            // A previously completed domain job does not acknowledge a new
+            // request whose reply was lost. Keep the form for manual retry.
+            unstartedMutation = state.pendingMutation;
+            state.pendingMutation = null;
+        }
         if (state.pendingMutation && (job.status === 'idle' ||
             (state.pendingMutation.type === 'install' && job.type === 'host' && job.status === 'complete'))) {
             // The server reports no matching install. Offer an explicit retry;
@@ -296,7 +303,9 @@
         showScreen('wizard-screen'); showStep(state.step, false);
         if (unstartedMutation) setError(unstartedMutation.type === 'host' ? 'host-error' : 'settings-error', job.status === 'failed'
             ? 'Задание остановлено: ' + (job.error || 'сервер не сообщил причину.') + ' Ответ на запрос изменения не подтверждён. Проверьте настройки и повторите действие вручную; автоматически запрос не повторялся.'
-            : 'Сервер не сообщает о запущенном задании. Проверьте настройки и повторите запуск вручную. Повтор автоматически не выполнялся.');
+            : unstartedMutation.type === 'host' && job.type === 'host' && job.status === 'complete'
+                ? 'Настройка домена ' + unstartedMutation.host + ' не подтверждена. Проверьте состояние и повторите запрос вручную. Автоматического повтора не было.'
+                : 'Сервер не сообщает о запущенном задании. Проверьте настройки и повторите запуск вручную. Повтор автоматически не выполнялся.');
     }
 
     async function refreshStatus(manual) {
@@ -574,7 +583,7 @@
         if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(host)) { setError('host-error', 'Введите домен без протокола, пути и порта, например posts.example.com.'); $('domain-host').focus(); return; }
         if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { setError('host-error', 'Проверьте email для уведомлений.'); $('domain-email').focus(); return; }
         setError('host-error', ''); setBusy(true); cancelPoll(); $('host-progress').hidden = false;
-        state.pendingMutation = { type: 'host' };
+        state.pendingMutation = { type: 'host', host, previousJobId: normalizedJob(state.status && state.status.job).id };
         try {
             const result = await api('host', email ? { host, email } : { host });
             if (result.job) { state.status.job = result.job; state.pendingMutation = null; renderJob(normalizedJob(result.job)); showScreen('job-screen'); }
