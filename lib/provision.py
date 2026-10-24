@@ -27,7 +27,7 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
-VERSION = '0.1.0-rc.4'
+VERSION = '0.1.0-rc.5'
 INSTALL = Path('/opt/gitreposted-installer')
 APP = Path('/opt/gitreposted')
 STATE = Path('/var/lib/gitreposted-installer')

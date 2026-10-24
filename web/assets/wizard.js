@@ -525,6 +525,29 @@
         } finally { state.loginPending = false; setBusy(false); }
     }
 
+    function acceptSetupFragment() {
+        const fragment = root.location.hash;
+        // Same-document navigation does not rerun initialization. Leave ordinary
+        // anchors alone, including the keyboard navigation link to #main.
+        if (!/^#setup(?:=|$)/.test(fragment)) return;
+        const code = setupCodeFromFragment(fragment);
+        let scrubbed = false;
+        try { root.history.replaceState(null, '', '/install/'); scrubbed = true; }
+        catch (_) { /* Never submit a code still visible in the address bar. */ }
+        // Opening another setup link must not reset entered settings, interrupt
+        // an active job, or replay enrollment while its outcome is pending.
+        if (state.loginPending || state.busy || state.pendingMutation ||
+            (state.status && (state.status.installed === true || normalizedJob(state.status.job).status === 'running'))) return;
+        enrollmentCode = scrubbed ? code : null;
+        state.entryError = !scrubbed ? 'Не удалось безопасно открыть ссылку. Откройте её в новой вкладке.' :
+            (code ? '' : 'Ссылка недействительна. Получите новую ссылку командой --resume в SSH-консоли сервера.');
+        if (!scrubbed) { setError('login-error', state.entryError); showScreen('login-screen'); return; }
+        // Reuse status reconciliation and its HTTPS check before enrollment.
+        // Cached authentication may have expired; a confirmed live session
+        // discards the code without changing the entered form values.
+        refreshStatus(false);
+    }
+
     $('settings-form').addEventListener('submit', (event) => {
         event.preventDefault(); if (state.busy) return;
         if (state.step === 4) { startInstall(); return; }
@@ -589,6 +612,7 @@
         finally { setBusy(false); }
     });
     for (const id of ['loading-retry', 'http-retry', 'job-refresh', 'login-refresh']) $(id).addEventListener('click', () => refreshStatus(true));
+    root.addEventListener('hashchange', acceptSetupFragment);
     root.addEventListener('online', () => refreshStatus(false));
     refreshStatus(false);
 })(typeof window !== 'undefined' ? window : globalThis);

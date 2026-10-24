@@ -35,7 +35,7 @@ async function fixture(options = {}) {
         if (url.pathname === '/install/api.php') {
             const action = url.searchParams.get('action');
             const body = request.method() === 'POST' ? request.postDataJSON() : null;
-            calls.push({ action, body, method: request.method(), url: request.url(), csrf: request.headers()['x-csrf-token'] });
+            calls.push({ action, body, method: request.method(), url: request.url(), csrf: request.headers()['x-csrf-token'], addressHadFragment: Boolean(new URL(page.url()).hash) });
             let result;
             if (options.onApi) result = await options.onApi({ action, body, status, calls, route });
             if (result === 'abort') { await route.abort('connectionreset'); return; }
@@ -63,6 +63,10 @@ async function fixture(options = {}) {
 
 async function login(f) {
     await f.page.locator('#wizard-screen').waitFor({ state: 'visible' });
+}
+
+async function settleFragment(page) {
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 
 async function adminAndBots(f, options = {}) {
@@ -101,8 +105,181 @@ test('setup link logs in automatically after removing fragment from the address'
         assert.equal(f.page.url(), 'https://installer.example/install/');
         const request = f.calls.find((call) => call.action === 'login');
         assert.deepEqual(request.body, { code: 'x'.repeat(32) });
+        assert.equal(request.addressHadFragment, false);
         assert.equal(f.calls.some((call) => call.url.includes('setup=') || call.url.includes('x'.repeat(32))), false);
         assert.equal(await f.page.locator('#login-form').count(), 0);
+    } finally { await f.close(); }
+});
+
+test('setup link pasted into an open login page enrolls once without reloading the document', async () => {
+    const f = await fixture({ autoLogin: false });
+    const code = 's'.repeat(40);
+    try {
+        await f.page.locator('#login-screen').waitFor({ state: 'visible' });
+        await f.page.evaluate(() => { window.fixtureDocument = 'same-document'; });
+        await f.page.goto('https://installer.example/install/#setup=' + code);
+        await login(f);
+        assert.equal(await f.page.evaluate(() => window.fixtureDocument), 'same-document');
+        assert.equal(f.page.url(), 'https://installer.example/install/');
+        assert.deepEqual(f.calls.filter((call) => call.action === 'login').map((call) => call.body), [{ code }]);
+        assert.equal(f.calls.find((call) => call.action === 'login').addressHadFragment, false);
+        assert.equal(f.calls.some((call) => call.action === 'start'), false);
+        assert.equal(f.calls.some((call) => call.url.includes('setup=') || call.url.includes(code)), false);
+    } finally { await f.close(); }
+});
+
+test('another setup fragment during pending enrollment is removed without a second login', async () => {
+    let release;
+    const pending = new Promise((resolve) => { release = resolve; });
+    const f = await fixture({ autoLogin: false, onApi: async ({ action }) => { if (action === 'login') await pending; } });
+    const first = 'p'.repeat(40); const second = 'q'.repeat(40);
+    try {
+        await f.page.locator('#login-screen').waitFor({ state: 'visible' });
+        const enrollment = f.page.waitForRequest((request) => new URL(request.url()).searchParams.get('action') === 'login', { timeout: 4000 });
+        await f.page.goto('https://installer.example/install/#setup=' + first);
+        await enrollment;
+        await f.page.goto('https://installer.example/install/#setup=' + second);
+        await settleFragment(f.page);
+        assert.equal(f.page.url(), 'https://installer.example/install/');
+        assert.deepEqual(f.calls.filter((call) => call.action === 'login').map((call) => call.body), [{ code: first }]);
+        assert.equal(f.calls.find((call) => call.action === 'login').addressHadFragment, false);
+        assert.equal(f.calls.filter((call) => call.method === 'POST').length, 1);
+        release(); await login(f);
+        assert.equal(f.calls.filter((call) => call.action === 'login').length, 1);
+        assert.equal(f.calls.some((call) => call.url.includes(first) || call.url.includes(second)), false);
+    } finally { release(); await f.close(); }
+});
+
+test('setup fragment after authentication preserves the current step and entered settings', async () => {
+    const f = await fixture();
+    try {
+        await login(f); await f.page.locator('#next-step').click();
+        await f.page.locator('#admin-username').fill('keep_operator');
+        await f.page.locator('#admin-password').fill('keep-fixture-password');
+        await f.page.locator('#admin-password-confirm').fill('keep-fixture-password');
+        const calls = f.calls.length;
+        await f.page.goto('https://installer.example/install/#setup=' + 'a'.repeat(40));
+        await settleFragment(f.page);
+        assert.equal(f.page.url(), 'https://installer.example/install/');
+        assert.equal(await f.page.locator('#admin-title').isVisible(), true);
+        assert.equal(await f.page.locator('#admin-username').inputValue(), 'keep_operator');
+        assert.equal(await f.page.locator('#admin-password').inputValue(), 'keep-fixture-password');
+        assert.equal(await f.page.locator('#admin-password-confirm').inputValue(), 'keep-fixture-password');
+        assert.deepEqual(f.calls.slice(calls).map((call) => [call.action, call.method]), [['status', 'GET']]);
+        assert.equal(f.calls.filter((call) => call.action === 'login').length, 1);
+    } finally { await f.close(); }
+});
+
+test('fresh setup link recovers an expired idle session after confirming backend status', async () => {
+    const f = await fixture();
+    const code = 'e'.repeat(40);
+    try {
+        await login(f);
+        f.status.authenticated = false;
+        const calls = f.calls.length;
+        const enrollment = f.page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).searchParams.get('action') === 'login', { timeout: 4000 });
+        await f.page.goto('https://installer.example/install/#setup=' + code);
+        await enrollment;
+        await login(f);
+        assert.equal(f.page.url(), 'https://installer.example/install/');
+        assert.deepEqual(f.calls.slice(calls).map((call) => [call.action, call.method]), [['status', 'GET'], ['login', 'POST'], ['status', 'GET']]);
+        assert.deepEqual(f.calls.filter((call) => call.action === 'login').map((call) => call.body), [{ code: 'x'.repeat(32) }, { code }]);
+        assert.equal(f.calls.some((call) => call.action === 'start'), false);
+    } finally { await f.close(); }
+});
+
+test('setup fragment during a running install leaves its job and polling intact without restarting', async () => {
+    const f = await fixture();
+    try {
+        await login(f); await adminAndBots(f); await review(f);
+        await f.page.locator('#next-step').click(); await f.page.locator('#job-screen').waitFor({ state: 'visible' });
+        await f.page.waitForFunction(() => document.getElementById('settings-form').getAttribute('aria-busy') === 'false');
+        await f.page.goto('https://installer.example/install/#setup=' + 'r'.repeat(40));
+        await settleFragment(f.page);
+        assert.equal(f.page.url(), 'https://installer.example/install/');
+        assert.equal(await f.page.locator('#job-screen').isVisible(), true);
+        assert.equal(f.status.job.id, 'install_fixture');
+        assert.match(await f.page.locator('#job-steps').innerText(), /Настройки приложения/);
+        assert.equal(f.calls.filter((call) => call.action === 'login').length, 1);
+        assert.equal(f.calls.filter((call) => call.action === 'start').length, 1);
+        const statuses = f.calls.filter((call) => call.action === 'status').length;
+        await f.page.locator('#job-refresh').click();
+        await f.page.waitForFunction(() => !document.getElementById('job-refresh').disabled);
+        assert.ok(f.calls.filter((call) => call.action === 'status').length > statuses);
+        assert.equal(await f.page.locator('#job-screen').isVisible(), true);
+    } finally { await f.close(); }
+});
+
+test('malformed setup fragment in an open login page is removed and never submitted', async () => {
+    const f = await fixture({ autoLogin: false });
+    try {
+        await f.page.locator('#login-screen').waitFor({ state: 'visible' });
+        for (const fragment of ['#setup=short&other=value', '#setup']) {
+            await f.page.goto('https://installer.example/install/' + fragment);
+            await f.page.locator('#login-error').waitFor({ state: 'visible' });
+            await settleFragment(f.page);
+            assert.match(await f.page.locator('#login-error').innerText(), /Ссылка недействительна/);
+            assert.equal(f.page.url(), 'https://installer.example/install/');
+        }
+        assert.equal(f.calls.some((call) => call.method === 'POST'), false);
+    } finally { await f.close(); }
+});
+
+test('setup fragment added to an open HTTP page is scrubbed without sending credentials', async () => {
+    const f = await fixture({ autoLogin: false, http: true });
+    try {
+        await f.page.locator('#http-screen').waitFor({ state: 'visible' });
+        const statuses = f.calls.filter((call) => call.action === 'status').length;
+        await f.page.goto('http://installer.example/install/#setup=' + 'h'.repeat(40));
+        await settleFragment(f.page);
+        assert.equal(f.page.url(), 'http://installer.example/install/');
+        assert.equal(await f.page.locator('#http-screen').isVisible(), true);
+        assert.ok(f.calls.filter((call) => call.action === 'status').length > statuses);
+        assert.equal(f.calls.some((call) => call.method === 'POST'), false);
+    } finally { await f.close(); }
+});
+
+test('ordinary main anchor navigation is preserved and does not trigger setup API calls', async () => {
+    const f = await fixture({ autoLogin: false });
+    try {
+        await f.page.locator('#login-screen').waitFor({ state: 'visible' });
+        const calls = f.calls.length;
+        await f.page.goto('https://installer.example/install/#main');
+        await settleFragment(f.page);
+        assert.equal(f.page.url(), 'https://installer.example/install/#main');
+        assert.equal(await f.page.locator('#login-screen').isVisible(), true);
+        assert.equal(f.calls.length, calls);
+    } finally { await f.close(); }
+});
+
+test('setup fragment on a completed installation is scrubbed without reopening enrollment', async () => {
+    const f = await fixture({ autoLogin: false, status: { installed: true } });
+    try {
+        await f.page.locator('#complete-screen').waitFor({ state: 'visible' });
+        const calls = f.calls.length;
+        await f.page.goto('https://installer.example/install/#setup=' + 'i'.repeat(40));
+        await settleFragment(f.page);
+        assert.equal(f.page.url(), 'https://installer.example/install/');
+        assert.equal(await f.page.locator('#complete-screen').isVisible(), true);
+        assert.equal(f.calls.length, calls);
+        assert.equal(f.calls.some((call) => call.method === 'POST'), false);
+    } finally { await f.close(); }
+});
+
+test('failure to remove a new setup fragment refuses enrollment and gives safe recovery guidance', async () => {
+    const f = await fixture({ autoLogin: false });
+    try {
+        await f.page.locator('#login-screen').waitFor({ state: 'visible' });
+        const calls = f.calls.length;
+        await f.page.evaluate(() => { history.replaceState = () => { throw new Error('fixture raw history failure'); }; });
+        await f.page.goto('https://installer.example/install/#setup=' + 'f'.repeat(40));
+        await f.page.locator('#login-error').waitFor({ state: 'visible' });
+        assert.match(await f.page.locator('#login-error').innerText(), /Откройте её в новой вкладке/);
+        assert.doesNotMatch(await f.page.locator('body').innerText(), /fixture raw history failure/);
+        assert.equal(f.calls.length, calls);
+        await f.page.locator('#login-refresh').click();
+        await f.page.waitForFunction(() => !document.getElementById('job-refresh').disabled);
+        assert.equal(f.calls.some((call) => call.method === 'POST'), false);
     } finally { await f.close(); }
 });
 
