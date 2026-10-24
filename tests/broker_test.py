@@ -160,8 +160,9 @@ class BrokerTests(unittest.TestCase):
         self.finish_fixture()
         self.save_json(self.state / "installed.json", {"installed_at": 123, "version": "fixture", "admin_url": "https://local.example/control/"})
         self.save_json(self.state / "access.json", {"one_time_fixture": "not reusable"})
-        with mock.patch.object(os, "geteuid", return_value=0, create=True), mock.patch.object(broker, "Server", side_effect=AssertionError("Completed installation must not reopen the privileged socket")):
+        with mock.patch.object(os, "geteuid", return_value=0, create=True), mock.patch.object(broker, "Server", side_effect=AssertionError("Completed installation must not reopen the privileged socket")), mock.patch.object(p, "run", return_value=b"") as system:
             broker.main()
+        system.assert_called_once_with(["systemctl", "disable", "gitreposted-installer.service"])
         durable = p.read_json(self.state / "public.json")
         self.assertTrue(durable.get("installed"), "Terminal marker was ignored and UI stayed pending")
         self.assertEqual(durable["job"]["status"], "complete")
@@ -170,6 +171,45 @@ class BrokerTests(unittest.TestCase):
         private = p.read_json(self.state / "private.json")
         self.assertFalse(any(name in private for name in ("settings", "config", "enrollment")))
         self.assertFalse((self.state / "access.json").exists())
+
+    def test_post_marker_save_failure_recovers_state_and_still_retires_temporary_broker(self):
+        for target in ("private.json", "public.json"):
+            with self.subTest(target=target):
+                app = self.finish_fixture()
+                failed = False
+                def save(path, value, public=False):
+                    nonlocal failed
+                    if Path(path).name == target and (self.state / "installed.json").exists() and not failed:
+                        failed = True
+                        raise OSError("Captured terminal checkpoint failure")
+                    self.save_json(path, value, public)
+                with mock.patch.object(p, "configure_nginx"), mock.patch.object(p, "save_json", side_effect=save), mock.patch.object(p, "run", return_value=b"") as system, mock.patch.object(broker.threading, "Timer") as timer:
+                    self.execute(app)
+                    self.assertTrue(failed)
+                    self.assertTrue(p.read_json(self.state / "public.json")["installed"])
+                    self.assertEqual(app.public["job"]["status"], "complete")
+                    system.assert_called_once_with(["systemctl", "disable", "gitreposted-installer.service"])
+                    self.assertEqual(timer.call_args.args[0], 3)
+                    timer.return_value.start.assert_called_once_with()
+                    timer.call_args.args[1]()
+                    self.assertEqual(system.call_args.args[0], ["systemctl", "stop", "gitreposted-installer.service"])
+                (self.state / "installed.json").unlink()
+
+    def test_startup_reconciliation_failure_still_disables_without_opening_socket(self):
+        self.finish_fixture()
+        self.save_json(self.state / "installed.json", {"installed_at": 123, "version": "fixture", "admin_url": "https://local.example/control/"})
+        with mock.patch.object(os, "geteuid", return_value=0, create=True), mock.patch.object(p, "reconcile_installed", side_effect=OSError("Captured projection write failure")), mock.patch.object(p, "run", return_value=b"") as system, mock.patch.object(broker, "Server") as server:
+            with self.assertRaises(OSError):
+                broker.main()
+        system.assert_called_once_with(["systemctl", "disable", "gitreposted-installer.service"])
+        server.assert_not_called()
+
+    def test_failed_disable_still_attempts_to_stop_the_completed_broker(self):
+        with mock.patch.object(p, "run", side_effect=p.Failure("SYSTEM_COMMAND_FAILED", "Captured failure")) as system, mock.patch.object(broker.threading, "Timer") as timer:
+            broker.retire_installer(stop=True)
+            timer.return_value.start.assert_called_once_with()
+            timer.call_args.args[1]()
+        self.assertEqual([call.args[0][1] for call in system.call_args_list], ["disable", "stop"])
 
     def test_helper_preserves_safe_error_envelope_from_nonzero_php_without_stderr_leak(self):
         response = json.dumps({"ok": False, "error": {"code": "TAKEOVER_REQUIRED", "message": "unsafe fixture-private"}}).encode()

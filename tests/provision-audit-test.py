@@ -27,6 +27,54 @@ spec.loader.exec_module(p)
 
 
 class ProvisionAuditTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def bundle_io(self, target):
+        """Real temp files; adapt only unavailable ownership/fsync/rename APIs.
+
+        Linux root runs use the actual renameat2 publication and permissions.
+        Windows' exchange adapter verifies transaction ordering, not atomicity.
+        """
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(p, 'INSTALL', target))
+            if os.name != 'posix':
+                original = Path.lstat
+                def lstat(path, *args, **kwargs):
+                    info = original(path, *args, **kwargs)
+                    mode = stat.S_IFMT(info.st_mode) | (0o755 if stat.S_ISDIR(info.st_mode) else 0o644)
+                    return types.SimpleNamespace(st_mode=mode, st_uid=0, st_dev=info.st_dev,
+                                                 st_ino=info.st_ino, st_nlink=info.st_nlink)
+                def atomic(path, value, *_args, **_kwargs):
+                    Path(path).write_bytes(value.encode() if isinstance(value, str) else value)
+                def publish(stage, replace_existing):
+                    if replace_existing:
+                        retired = stage.with_name(stage.name + '.exchange-fixture')
+                        target.rename(retired); stage.rename(target); retired.rename(stage)
+                    else:
+                        if target.exists():
+                            raise p.Failure('BUNDLE_UNAVAILABLE', 'Fixture no-replace conflict')
+                        stage.rename(target)
+                stack.enter_context(patch.object(Path, 'lstat', lstat))
+                stack.enter_context(patch.object(p, 'atomic', side_effect=atomic))
+                stack.enter_context(patch.object(p, 'sync_directory'))
+                stack.enter_context(patch.object(p, 'publish_bundle', side_effect=publish))
+            elif os.geteuid() != 0:
+                original = Path.lstat
+                def lstat(path, *args, **kwargs):
+                    info = original(path, *args, **kwargs)
+                    return types.SimpleNamespace(st_mode=info.st_mode, st_uid=0, st_dev=info.st_dev,
+                                                 st_ino=info.st_ino, st_nlink=info.st_nlink)
+                stack.enter_context(patch.object(Path, 'lstat', lstat))
+                stack.enter_context(patch.object(p.os, 'fchown'))
+            yield
+
+    def bundle_fixture(self, prefix=b'new'):
+        return {'bootstrap.sh': prefix + b' bootstrap', 'lib/provision.py': prefix + b' provision',
+                'payload/src/server.js': prefix + b' server', 'scripts/build.py': prefix + b' builder'}
+
+    def bundle_bytes(self, target):
+        return {path.relative_to(target).as_posix(): path.read_bytes()
+                for path in target.rglob('*') if path.is_file()}
+
     def public_bundle(self, source):
         builder_path = Path(__file__).resolve().parents[1] / 'scripts/build.py'
         builder_spec = importlib.util.spec_from_file_location('provision_package_fixture', builder_path)
@@ -150,10 +198,184 @@ class ProvisionAuditTests(unittest.TestCase):
 
     def test_persisted_bundle_contains_only_validated_members(self):
         files = {'bootstrap.sh': b'bootstrap', 'scripts/build.py': b'fixture builder'}
-        writes = {}
-        with patch.object(p, 'directory'), patch.object(p, 'atomic', side_effect=lambda path, value, *_: writes.update({path:value})):
-            p.persist_bundle(Path('/fixture/source'), files)
-        self.assertEqual({p.INSTALL / name:value for name,value in files.items()}, writes)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); target = root / 'installer'
+            with self.bundle_io(target):
+                p.persist_bundle(root / 'source', files)
+            self.assertEqual(files, self.bundle_bytes(target))
+            self.assertEqual([target], list(root.iterdir()))
+
+    def test_midcopy_failure_never_publishes_initial_or_changes_previous_complete_bundle(self):
+        for replacement in (False, True):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); target = root / 'installer'
+                files = self.bundle_fixture()
+                with self.bundle_io(target):
+                    if replacement:
+                        p.persist_bundle(root / 'old-source', self.bundle_fixture(b'old'))
+                    before = self.bundle_bytes(target) if replacement else None
+                    writer = p.atomic
+                    def fail_midcopy(path, value, *args, **kwargs):
+                        self.assertEqual(before, self.bundle_bytes(target) if target.exists() else None)
+                        if Path(path).name == 'server.js':
+                            raise OSError('Injected write interruption before the complete bundle exists')
+                        return writer(path, value, *args, **kwargs)
+                    with patch.object(p, 'atomic', side_effect=fail_midcopy), self.assertRaises(OSError):
+                        p.persist_bundle(root / 'new-source', files)
+                self.assertEqual(before, self.bundle_bytes(target) if target.exists() else None)
+                self.assertEqual([target] if replacement else [], list(root.iterdir()))
+
+    def test_complete_replacement_keeps_old_bytes_until_commit_and_local_resume_does_not_rewrite(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); target = root / 'installer'
+            old, new = self.bundle_fixture(b'old'), self.bundle_fixture(b'new')
+            with self.bundle_io(target):
+                p.persist_bundle(root / 'old-source', old)
+                publisher = p.publish_bundle
+                def commit(stage, replacement):
+                    self.assertTrue(replacement)
+                    self.assertEqual(old, self.bundle_bytes(target))
+                    self.assertEqual(new, self.bundle_bytes(stage))
+                    return publisher(stage, replacement)
+                with patch.object(p, 'publish_bundle', side_effect=commit) as publish:
+                    p.persist_bundle(root / 'new-source', new)
+                    publish.assert_called_once()
+                before = {path: path.stat().st_ino for path in target.rglob('*') if path.is_file()}
+                with patch.object(p, 'atomic') as rewrite, patch.object(p, 'publish_bundle') as publish:
+                    p.persist_bundle(target, new)
+                    rewrite.assert_not_called(); publish.assert_not_called()
+                self.assertEqual(before, {path: path.stat().st_ino for path in before})
+            self.assertEqual(new, self.bundle_bytes(target))
+            self.assertEqual([target], list(root.iterdir()))
+
+    def test_external_retry_replaces_only_allowlisted_partial_previous_bundle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); target = root / 'installer'; target.mkdir(mode=0o755)
+            (target / 'bootstrap.sh').write_bytes(b'old partial entrypoint')
+            (target / 'bootstrap.sh').chmod(0o644)
+            with self.bundle_io(target):
+                p.persist_bundle(root / 'external-release', self.bundle_fixture())
+            self.assertEqual(self.bundle_fixture(), self.bundle_bytes(target))
+            self.assertEqual([target], list(root.iterdir()))
+
+    def test_unknown_existing_file_is_preserved_and_prevents_any_staging_write(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); target = root / 'installer'; target.mkdir(mode=0o755)
+            foreign = target / 'unrelated-private-file'; foreign.write_bytes(b'preserve unrelated fixture')
+            foreign.chmod(0o600)
+            with self.bundle_io(target), patch.object(p, 'atomic') as write, self.assertRaises(p.Failure) as error:
+                p.persist_bundle(root / 'external-release', self.bundle_fixture())
+            self.assertEqual('UNSAFE_PATH', error.exception.code); write.assert_not_called()
+            self.assertEqual(b'preserve unrelated fixture', foreign.read_bytes())
+            self.assertEqual([foreign], list(target.iterdir())); self.assertEqual([target], list(root.iterdir()))
+
+    def test_failed_publish_preserves_previous_bundle_and_removes_only_own_stage(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); target = root / 'installer'
+            with self.bundle_io(target):
+                p.persist_bundle(root / 'old-source', self.bundle_fixture(b'old'))
+                with patch.object(p, 'publish_bundle', side_effect=p.Failure('BUNDLE_UNAVAILABLE', 'Injected commit failure')):
+                    with self.assertRaises(p.Failure):
+                        p.persist_bundle(root / 'new-source', self.bundle_fixture())
+            self.assertEqual(self.bundle_fixture(b'old'), self.bundle_bytes(target))
+            self.assertEqual([target], list(root.iterdir()))
+
+    def test_flush_failure_never_publishes_or_cleans_a_different_staging_sibling(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); target = root / 'installer'
+            unrelated = root / '.installer-bundle.unrelated'; unrelated.mkdir(mode=0o700)
+            sentinel = unrelated / 'private-fixture'; sentinel.write_bytes(b'preserve separate tree')
+            with self.bundle_io(target):
+                sync = p.sync_directory
+                failed = False
+                def fail_once(path):
+                    nonlocal failed
+                    if not failed:
+                        failed = True
+                        raise OSError('Injected directory fsync failure before publication')
+                    return sync(path)
+                with patch.object(p, 'sync_directory', side_effect=fail_once), patch.object(p, 'publish_bundle') as publish:
+                    with self.assertRaises(OSError):
+                        p.persist_bundle(root / 'external-source', self.bundle_fixture())
+                    publish.assert_not_called()
+            self.assertFalse(target.exists()); self.assertEqual([unrelated], list(root.iterdir()))
+            self.assertEqual(b'preserve separate tree', sentinel.read_bytes())
+
+    def test_parent_fsync_failure_after_publication_preserves_retired_bundle_for_recovery(self):
+        for replacement in (False, True):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); target = root / 'installer'
+                old, new = self.bundle_fixture(b'old'), self.bundle_fixture(b'new')
+                with self.bundle_io(target):
+                    if replacement:
+                        p.persist_bundle(root / 'old-source', old)
+                    publisher, sync = p.publish_bundle, p.sync_directory
+                    published, retired = False, None
+                    def commit(stage, replace_existing):
+                        nonlocal published, retired
+                        publisher(stage, replace_existing)
+                        published = True
+                        retired = stage if replace_existing else None
+                    def fail_parent_sync(path):
+                        if published and Path(path) == root:
+                            raise OSError('fixture-private raw fsync detail')
+                        return sync(path)
+                    with patch.object(p, 'publish_bundle', side_effect=commit), patch.object(p, 'sync_directory', side_effect=fail_parent_sync):
+                        with self.assertRaises(p.Failure) as error:
+                            p.persist_bundle(root / 'new-source', new)
+                    self.assertEqual('BUNDLE_UNAVAILABLE', error.exception.code)
+                    self.assertNotIn('fixture-private raw fsync detail', str(error.exception))
+                    self.assertIn('--resume', str(error.exception))
+                    self.assertEqual(new, self.bundle_bytes(target))
+                    if replacement:
+                        self.assertIn(str(retired), str(error.exception))
+                        self.assertEqual(old, self.bundle_bytes(retired))
+                    else:
+                        self.assertEqual([target], list(root.iterdir()))
+                    # A safe external retry operates only on INSTALL and its
+                    # newly-created stage. The retained sibling is not adopted
+                    # or automatically deleted after storage becomes healthy.
+                    p.persist_bundle(root / 'retry-source', new)
+                    self.assertEqual(new, self.bundle_bytes(target))
+                    if replacement:
+                        self.assertEqual(old, self.bundle_bytes(retired))
+                        self.assertEqual({target, retired}, set(root.iterdir()))
+                    else:
+                        self.assertEqual([target], list(root.iterdir()))
+
+    def test_existing_allowlisted_hardlink_is_preserved_and_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); target = root / 'installer'; target.mkdir(mode=0o755)
+            outside = root / 'unrelated-file'; outside.write_bytes(b'preserve linked private fixture')
+            outside.chmod(0o600)
+            try:
+                os.link(outside, target / 'bootstrap.sh')
+            except OSError:
+                self.skipTest('Host does not permit fixture hardlinks')
+            with self.bundle_io(target), self.assertRaises(p.Failure) as error:
+                p.persist_bundle(root / 'external-source', self.bundle_fixture())
+            self.assertEqual('UNSAFE_PATH', error.exception.code)
+            self.assertEqual(b'preserve linked private fixture', outside.read_bytes())
+            self.assertEqual(b'preserve linked private fixture', (target / 'bootstrap.sh').read_bytes())
+            self.assertEqual(2, outside.stat().st_nlink)
+
+    def test_bundle_file_directory_collision_is_rejected_before_any_write(self):
+        with patch.object(p, 'directory') as directory, patch.object(p, 'atomic') as atomic, self.assertRaises(p.Failure) as error:
+            p.persist_bundle(Path('/fixture/source'), {'bootstrap.sh': b'file', 'bootstrap.sh/child': b'collision'})
+        self.assertEqual('UNSAFE_PACKAGE', error.exception.code)
+        directory.assert_not_called(); atomic.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0, 'Linux root actual renameat2 publication')
+    def test_real_linux_no_replace_and_exchange_publish_complete_bundle_directories(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); target = root / 'installer'
+            with patch.object(p, 'INSTALL', target):
+                p.persist_bundle(root / 'first-release', self.bundle_fixture(b'old'))
+                old_inode = target.stat().st_ino
+                p.persist_bundle(root / 'second-release', self.bundle_fixture())
+            self.assertNotEqual(old_inode, target.stat().st_ino)
+            self.assertEqual(self.bundle_fixture(), self.bundle_bytes(target))
+            self.assertEqual([target], list(root.iterdir()))
 
     @unittest.skipUnless(os.name == 'posix', 'Linux umask and file modes')
     def test_persisted_multilevel_bundle_remains_app_readable_under_private_umask(self):
@@ -174,8 +396,7 @@ class ProvisionAuditTests(unittest.TestCase):
             try:
                 # Non-root developer runs cannot chown to root; preserve the
                 # real filesystem writes/modes while avoiding that unrelated requirement.
-                ownership = contextlib.nullcontext() if os.geteuid() == 0 else patch.object(p.os, 'fchown')
-                with patch.object(p, 'INSTALL', target), ownership:
+                with self.bundle_io(target):
                     p.persist_bundle(root / 'source', files)
             finally:
                 os.umask(previous_umask)
@@ -192,7 +413,7 @@ class ProvisionAuditTests(unittest.TestCase):
             # its public ancestors without rewriting the files being executed.
             (target / 'payload').chmod(0o700)
             (target / 'payload/resources').chmod(0o700)
-            with patch.object(p, 'INSTALL', target), patch.object(p, 'atomic') as rewrite:
+            with self.bundle_io(target), patch.object(p, 'atomic') as rewrite:
                 p.persist_bundle(target, files)
                 rewrite.assert_not_called()
             for path in [target, *(item for item in target.rglob('*') if item.is_dir())]:
@@ -238,7 +459,7 @@ class ProvisionAuditTests(unittest.TestCase):
             outside = root / 'outside'; outside.mkdir(mode=0o700)
             marker = outside / 'resource'; marker.write_bytes(b'preserve fixture')
             (target / 'payload').symlink_to(outside, target_is_directory=True)
-            with patch.object(p, 'INSTALL', target), self.assertRaises(p.Failure) as error:
+            with self.bundle_io(target), self.assertRaises(p.Failure) as error:
                 p.persist_bundle(root / 'source', {'payload/resources/assets/file': b'public fixture'})
             self.assertEqual('UNSAFE_PATH', error.exception.code)
             self.assertEqual(0o700, stat.S_IMODE(outside.stat().st_mode))

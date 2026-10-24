@@ -465,6 +465,23 @@
         $('job-edit').textContent = host ? 'Изменить домен или продолжить по IP' : 'Изменить настройки';
     }
 
+    async function mutationFailed(error, field, type) {
+        if (error.definitive && error.status !== 410) {
+            state.pendingMutation = null;
+            // A rejection can also describe an existing job. Reconcile it, but
+            // retain the new explanation when the edited job did not advance.
+            await refreshStatus(false);
+            if (state.status && state.status.authenticated === true && state.status.installed !== true) {
+                const job = normalizedJob(state.status.job);
+                if (job.status === 'failed' && state.editingJobId !== job.id) setError('job-error', error.message);
+                else if (job.status !== 'running') setError(field, error.message);
+            }
+        } else {
+            renderJob(normalizedJob({ type })); showScreen('job-screen');
+            $('job-offline').hidden = false; schedulePoll(1000);
+        }
+    }
+
     async function startInstall() {
         const config = settings();
         if (showValidationErrors(validateSettings(config, state.checks))) return;
@@ -479,8 +496,7 @@
             else { renderJob(normalizedJob({})); showScreen('job-screen'); }
             await refreshStatus(false);
         } catch (error) {
-            if (error.definitive && error.status !== 409 && error.status !== 410) { state.pendingMutation = null; setError('settings-error', error.message); }
-            else { renderJob(normalizedJob({})); showScreen('job-screen'); $('job-offline').hidden = false; schedulePoll(1000); }
+            await mutationFailed(error, 'settings-error', 'install');
         } finally { setBusy(false); }
     }
 
@@ -531,8 +547,7 @@
             if (result.job) { state.status.job = result.job; state.pendingMutation = null; renderJob(normalizedJob(result.job)); showScreen('job-screen'); }
             await refreshStatus(false);
         } catch (error) {
-            if (error.definitive && error.status !== 409 && error.status !== 410) { state.pendingMutation = null; setError('host-error', error.message); }
-            else { renderJob(normalizedJob({ type: 'host' })); showScreen('job-screen'); $('job-offline').hidden = false; schedulePoll(1000); }
+            await mutationFailed(error, 'host-error', 'host');
         } finally { $('host-progress').hidden = true; setBusy(false); }
     });
 

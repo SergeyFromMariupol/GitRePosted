@@ -7062,6 +7062,58 @@ function safeWebhookFailure(error) {
   return safe;
 }
 
+function startBotCommandMatches(commands, platform) {
+  if (!Array.isArray(commands) || commands.length !== 1) return false;
+  const command = commands[0];
+  const name = command?.[platform === "telegram" ? "command" : "name"];
+  const description = command?.description;
+  if (typeof name !== "string" || typeof description !== "string") return false;
+  return (platform === "max" ? name.trim().replace(/^\/+/, "") : name) === "start"
+    && (platform === "max" ? description.trim() : description) === "Открыть главное меню";
+}
+
+async function reconcileBotMenuSetting(readSetting, writeSetting, matches) {
+  if (matches(await readSetting())) return;
+  try { await writeSetting(); }
+  catch { /* A lost control response is reconciled by reading the desired state. */ }
+  if (!matches(await readSetting())) throw new Error("Bot command menu was not confirmed.");
+}
+
+async function registerTelegramBotMenu() {
+  const commands = [{ command: "start", description: "Открыть главное меню" }];
+  for (const languageCode of ["", "ru"]) {
+    const language = languageCode ? { language_code: languageCode } : {};
+    await reconcileBotMenuSetting(
+      () => tgApi("getMyCommands", language),
+      async () => {
+        if (await tgApi("setMyCommands", { ...language, commands }) !== true) throw new Error("Commands were not registered.");
+      },
+      (value) => startBotCommandMatches(value, "telegram")
+    );
+  }
+  await reconcileBotMenuSetting(
+    () => tgApi("getChatMenuButton", {}),
+    async () => {
+      if (await tgApi("setChatMenuButton", { menu_button: { type: "commands" } }) !== true) throw new Error("Menu button was not registered.");
+    },
+    (value) => value?.type === "commands"
+  );
+}
+
+async function registerMaxBotMenu() {
+  await reconcileBotMenuSetting(
+    () => maxApi("/me"),
+    async () => {
+      const response = await maxApi("/me/commands", {
+        method: "PATCH",
+        body: JSON.stringify({ commands: [{ name: "start", description: "Открыть главное меню" }] })
+      });
+      if (!startBotCommandMatches(response?.commands, "max")) throw new Error("Commands were not registered.");
+    },
+    (value) => startBotCommandMatches(value?.commands, "max")
+  );
+}
+
 async function replaceTelegramWebhookSubscription(webhookUrl, takeover = false) {
   assertPlatformEnabled("telegram");
   try {
@@ -7076,6 +7128,7 @@ async function replaceTelegramWebhookSubscription(webhookUrl, takeover = false) 
     });
     if (registered !== true) throw new Error("Webhook was not registered");
     confirmWebhookEvents([await tgApi("getWebhookInfo", {})], webhookUrl, "telegram");
+    await registerTelegramBotMenu();
   } catch (error) { throw safeWebhookFailure(error); }
 }
 
@@ -7114,6 +7167,7 @@ async function replaceMaxWebhookSubscription(webhookUrl, takeover = false) {
       })
     });
     confirmWebhookEvents((await readSubscriptions()).filter((row) => row.url === webhookUrl), webhookUrl, "max");
+    await registerMaxBotMenu();
     for (const oldUrl of new Set(foreign.map((row) => row.url))) {
       await maxApi(`/subscriptions?url=${encodeURIComponent(oldUrl)}`, { method: "DELETE" });
     }

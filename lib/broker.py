@@ -153,6 +153,22 @@ def helper(request, timeout=45):
     return result['result']
 
 
+def retire_installer(stop=False):
+    """Retire the temporary unit even when terminal-state recovery was needed."""
+    try:
+        p.run(['systemctl', 'disable', 'gitreposted-installer.service'])
+    except p.Failure:
+        pass  # The installed marker still keeps the HTTP routes closed.
+    if stop:
+        def stop_service():
+            try:
+                p.run(['systemctl', 'stop', 'gitreposted-installer.service'])
+            except p.Failure:
+                pass
+        # Let the current HTTP response finish before stopping this process.
+        threading.Timer(3, stop_service).start()
+
+
 class Broker:
     def __init__(self):
         self.lock = threading.RLock()
@@ -404,13 +420,6 @@ class Broker:
             with self.lock:
                 job['status'] = 'complete'
                 self.save()
-            if job['type'] == 'install':
-                # UI reads terminal metadata directly; the privileged socket is no longer needed.
-                try:
-                    p.run(['systemctl', 'disable', 'gitreposted-installer.service'])
-                    threading.Timer(3, lambda: p.run(['systemctl', 'stop', 'gitreposted-installer.service'])).start()
-                except p.Failure:
-                    pass  # Installed marker and locked HTTP routes remain authoritative.
         except BaseException as error:
             with self.lock:
                 if (p.STATE / 'installed.json').exists():
@@ -428,8 +437,14 @@ class Broker:
                         step['status'] = 'failed'
                 self.save()
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+            try:
+                if (p.STATE / 'installed.json').exists():
+                    # A failure after the marker can bypass the normal completion
+                    # path. The temporary root socket must still be retired.
+                    retire_installer(stop=True)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
 
     def write_config(self, config):
         selected = self.private['settings']
@@ -599,8 +614,11 @@ def main():
     if os.geteuid() != 0:
         raise SystemExit('Root broker required.')
     if (p.STATE / 'installed.json').exists():
-        with p.installer_lock():
-            p.reconcile_installed()
+        try:
+            with p.installer_lock():
+                p.reconcile_installed()
+        finally:
+            retire_installer()
         return
     path = p.STATE / 'broker.sock'
     if path.exists() or path.is_symlink():

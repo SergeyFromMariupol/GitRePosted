@@ -27,7 +27,7 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
-VERSION = '0.1.0-rc.2'
+VERSION = '0.1.0-rc.3'
 INSTALL = Path('/opt/gitreposted-installer')
 APP = Path('/opt/gitreposted')
 STATE = Path('/var/lib/gitreposted-installer')
@@ -312,31 +312,135 @@ def package_files(source):
         raise Failure('INVALID_PACKAGE', 'Пакет неполон или содержит файлы вне публичного списка. Используйте полный проверенный release.') from None
 
 
-def persist_bundle(source, files):
-    destinations = []
+def bundle_members(files):
+    """Validate the complete relative namespace before touching the filesystem."""
+    members, directories = {}, {Path('.')}
     for name, content in sorted(files.items()):
         if (not isinstance(name, str) or not name or '\\' in name or '\x00' in name
                 or any(part in ('', '.', '..') for part in name.split('/'))):
             raise Failure('UNSAFE_PACKAGE', 'Пакет содержит неподходящий относительный путь.')
         relative = Path(*name.split('/'))
-        destination = INSTALL / relative
-        if relative.is_absolute() or relative.drive or not destination.is_relative_to(INSTALL):
+        if relative.is_absolute() or relative.drive or not (INSTALL / relative).is_relative_to(INSTALL):
             raise Failure('UNSAFE_PACKAGE', 'Файл пакета находится вне каталога установщика.')
-        destinations.append((relative, destination, content))
-    directory(INSTALL, 0o755)
-    same_source = Path(source).resolve() == INSTALL
-    for relative, destination, content in destinations:
-        # mkdir(parents=True) applies umask to implicit intermediate folders.
-        # Every public bundle ancestor must be traversable by the app UID;
-        # create/check each one explicitly, never chmod above INSTALL.
-        parent = INSTALL
-        for part in relative.parts[:-1]:
-            parent = parent / part
-            directory(parent, 0o755)
-        if destination.is_symlink():
-            raise Failure('UNSAFE_PATH', 'Файл установщика не должен быть символической ссылкой.')
-        if not same_source:
-            atomic(destination, content, 0o644)
+        members[relative] = content
+        directories.update(relative.parents)
+    if not members or directories.intersection(members):
+        raise Failure('UNSAFE_PACKAGE', 'Пути файлов и каталогов пакета пересекаются.')
+    return members, directories
+
+
+def bundle_inventory(root, members, directories):
+    """Accept only protected, ordinary entries from this explicit bundle layout.
+
+    A previous interrupted bootstrap may contain a subset of these entries.
+    Unknown files are never adopted or deleted, including when the caller is
+    retrying from a fresh external release bundle.
+    """
+    root = Path(root)
+    if not root.is_absolute() or root.resolve() != root:
+        raise Failure('UNSAFE_PATH', 'Небезопасный каталог установщика.')
+    for parent in root.parents:
+        info = parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
+            raise Failure('UNSAFE_PATH', 'Каталоги установщика должны быть защищены от чужой записи.')
+    inventory = {}
+
+    def inspect(path, relative):
+        info = path.lstat()
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise Failure('UNSAFE_PATH', 'Файлы установщика должны принадлежать root без чужой записи.')
+        if stat.S_ISDIR(info.st_mode) and relative in directories:
+            inventory[relative] = ('directory', info.st_dev, info.st_ino)
+            for child in path.iterdir():
+                inspect(child, relative / child.name)
+        elif stat.S_ISREG(info.st_mode) and relative in members and info.st_nlink == 1:
+            inventory[relative] = ('file', info.st_dev, info.st_ino)
+        else:
+            raise Failure('UNSAFE_PATH', 'В каталоге установщика есть посторонний файл или ссылка; автоматическая замена запрещена.')
+
+    inspect(root, Path('.'))
+    return inventory
+
+
+def publish_bundle(stage, replace_existing):
+    """Commit one complete directory; never expose a partly copied bundle."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    rename = libc.renameat2
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    # RENAME_EXCHANGE preserves the old bundle until the entire replacement is
+    # ready. RENAME_NOREPLACE refuses a destination which appeared meanwhile.
+    flags = 2 if replace_existing else 1
+    if rename(-100, os.fsencode(stage), -100, os.fsencode(INSTALL), flags) != 0:
+        raise Failure('BUNDLE_UNAVAILABLE', 'Не удалось атомарно сохранить полный пакет установщика. Повторите внешний загрузчик с --resume.')
+
+
+def cleanup_bundle_stage(stage, members, directories):
+    """Remove only this invocation's exact, allowlisted staging/retired tree."""
+    stage = Path(stage)
+    if (not stage.is_absolute() or stage.parent != INSTALL.parent or stage.parent.resolve() != stage.parent
+            or not stage.name.startswith('.' + INSTALL.name + '-bundle.') or stage.is_symlink()
+            or stage.resolve() != stage):
+        raise Failure('UNSAFE_PATH', 'Небезопасный временный каталог пакета установщика.')
+    inventory = bundle_inventory(stage, members, directories)
+    for relative in sorted(inventory, key=lambda item: len(item.parts), reverse=True):
+        path = stage / relative
+        path.rmdir() if inventory[relative][0] == 'directory' else path.unlink()
+    sync_directory(stage.parent)
+
+
+def persist_bundle(source, files):
+    members, directories = bundle_members(files)
+    if not INSTALL.is_absolute() or INSTALL.parent.resolve() != INSTALL.parent:
+        raise Failure('UNSAFE_PATH', 'Небезопасный путь пакета установщика.')
+    for parent in (INSTALL.parent, *INSTALL.parent.parents):
+        info = parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX)):
+            raise Failure('UNSAFE_PATH', 'Каталоги пакета установщика должны быть защищены от чужой записи.')
+    existing = bundle_inventory(INSTALL, members, directories) if INSTALL.exists() or INSTALL.is_symlink() else None
+    if Path(source).resolve() == INSTALL:
+        if existing is None or {name for name, info in existing.items() if info[0] == 'file'} != set(members):
+            raise Failure('INVALID_PACKAGE', 'Сохранённый пакет неполон. Повторите внешний загрузчик с --resume.')
+        # A validated local resume does not rewrite the code being executed.
+        # Repair only public bundle directory traversal left by older releases.
+        for relative in sorted(directories, key=lambda item: len(item.parts)):
+            directory(INSTALL / relative, 0o755)
+        for relative in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+            sync_directory(INSTALL / relative)
+        return
+    stage = Path(tempfile.mkdtemp(prefix='.' + INSTALL.name + '-bundle.', dir=INSTALL.parent))
+    published, durable = False, False
+    try:
+        for relative in sorted(directories - {Path('.')}, key=lambda item: (len(item.parts), str(item))):
+            directory(stage / relative, 0o755)
+        for relative, content in members.items():
+            atomic(stage / relative, content, 0o644)
+        directory(stage, 0o755)
+        staged = bundle_inventory(stage, members, directories)
+        if set(staged) != set(members) | directories:
+            raise Failure('INVALID_PACKAGE', 'Временный пакет установщика неполон.')
+        for relative in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+            sync_directory(stage / relative)
+        if existing is not None and bundle_inventory(INSTALL, members, directories) != existing:
+            raise Failure('UNSAFE_PATH', 'Сохранённый пакет изменился во время подготовки замены.')
+        publish_bundle(stage, existing is not None)
+        published = True
+        try:
+            sync_directory(INSTALL.parent)
+        except OSError:
+            retained = ' Предыдущий пакет сохранён: ' + str(stage) + '.' if existing is not None else ''
+            raise Failure('BUNDLE_UNAVAILABLE', 'Полный пакет опубликован, но сохранение каталога на диск не подтверждено.'
+                          + retained + ' Повторите внешний загрузчик с --resume. Сохранённые staging-каталоги автоматически не удаляются.') from None
+        durable = True
+    finally:
+        if stage.exists() or stage.is_symlink():
+            # After EXCHANGE this is the previous bundle. Do not destroy
+            # it until the parent has durably committed the new directory map.
+            # A later external resume never scans or removes these siblings.
+            if not (published and not durable and existing is not None):
+                cleanup_bundle_stage(stage, members, directories)
 
 
 def sync_directory(path):
