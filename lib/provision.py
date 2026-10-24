@@ -27,7 +27,7 @@ import tempfile
 import time
 from urllib.parse import urlsplit
 
-VERSION = '0.1.0-rc.1'
+VERSION = '0.1.0-rc.2'
 INSTALL = Path('/opt/gitreposted-installer')
 APP = Path('/opt/gitreposted')
 STATE = Path('/var/lib/gitreposted-installer')
@@ -810,6 +810,79 @@ def extract_node(archive_path, destination, prefix):
         archive.extractall(destination, members=members, filter='data')
 
 
+def normalize_node_tree(root):
+    """Open only root-owned vendor directories; never follow a vendor link.
+
+    tarfile's data filter deliberately drops directory modes. With bootstrap's
+    umask 077 those directories become 0700, even if the binary is executable.
+    Restore public traversal on the verified vendor tree, preserving all file
+    modes. Resolve relative npm links against a metadata map, without opening
+    their targets or ever walking outside this tree.
+    """
+    root = Path(root)
+    if not root.is_absolute() or root.is_symlink() or root.resolve() != root:
+        raise Failure('UNSAFE_PATH', 'Каталог Node.js должен быть каноническим обычным каталогом.')
+    entries, links = {(): 'directory'}, {}
+
+    def walk(descriptor, relative):
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise Failure('UNSAFE_PATH', 'Каталоги Node.js должны принадлежать root без чужой записи.')
+        os.fchmod(descriptor, 0o755)
+        for name in os.listdir(descriptor):
+            info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            current = relative + (name,)
+            if stat.S_ISDIR(info.st_mode):
+                entries[current] = 'directory'
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+                try:
+                    walk(child, current)
+                finally:
+                    os.close(child)
+            elif stat.S_ISREG(info.st_mode):
+                if info.st_uid != 0 or info.st_mode & 0o022 or info.st_nlink != 1:
+                    raise Failure('UNSAFE_PATH', 'Node.js содержит неподтверждённый файл.')
+                entries[current] = 'file'
+            elif stat.S_ISLNK(info.st_mode):
+                target = os.readlink(name, dir_fd=descriptor)
+                if (info.st_uid != 0 or not target or '\\' in target or PurePosixPath(target).is_absolute()
+                        or any(ord(char) < 32 or ord(char) == 127 for char in target)):
+                    raise Failure('UNSAFE_PATH', 'Node.js содержит неподходящую ссылку.')
+                entries[current], links[current] = 'link', target
+            else:
+                raise Failure('UNSAFE_PATH', 'Node.js содержит специальный файл.')
+
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        walk(descriptor, ())
+    finally:
+        os.close(descriptor)
+    for link, target in links.items():
+        pending, resolved, followed = [*link[:-1], *target.split('/')], [], 0
+        while pending:
+            part = pending.pop(0)
+            if part in ('', '.'):
+                continue
+            if part == '..':
+                if not resolved:
+                    raise Failure('UNSAFE_PATH', 'Ссылка Node.js выходит за каталог версии.')
+                resolved.pop()
+                continue
+            current = (*resolved, part)
+            kind = entries.get(current)
+            if kind is None:
+                raise Failure('UNSAFE_PATH', 'Ссылка Node.js не имеет подтверждённой цели.')
+            if kind == 'link':
+                followed += 1
+                if followed > 40:
+                    raise Failure('UNSAFE_PATH', 'Обнаружен цикл ссылок Node.js.')
+                pending = links[current].split('/') + pending
+            else:
+                if pending and kind != 'directory':
+                    raise Failure('UNSAFE_PATH', 'Ссылка Node.js проходит через неподходящий файл.')
+                resolved.append(part)
+
+
 def prepare_node():
     prefix, digest = node_archive()
     directory(NODE_ROOT, 0o755)
@@ -831,6 +904,7 @@ def prepare_node():
                 raise Failure('NODE_CHECKSUM', 'Контрольная сумма Node.js не совпадает.')
             extract_node(archive, stage, prefix)
             extracted = stage / prefix
+            normalize_node_tree(extracted)
             atomic(extracted / '.gitreposted-node.json', json.dumps({'version': NODE_VERSION, 'sha256': digest}), 0o644)
             os.rename(extracted, release)
             sync_directory(NODE_ROOT)
@@ -845,6 +919,9 @@ def prepare_node():
     marker = read_json(release / '.gitreposted-node.json')
     if marker != {'version': NODE_VERSION, 'sha256': digest}:
         raise Failure('NODE_CHECKSUM', 'Сохранённая версия Node.js не подтверждена.')
+    # Repair an interrupted installation made with the same pinned vendor
+    # archive before the app UID executes Node/npm. The marker is unchanged.
+    normalize_node_tree(release)
     binary = release / 'bin/node'
     for path in (release / 'bin', release / 'lib', release / 'lib/node_modules', release / 'lib/node_modules/npm',
                  release / 'lib/node_modules/npm/bin', binary, release / 'lib/node_modules/npm/bin/npm-cli.js'):

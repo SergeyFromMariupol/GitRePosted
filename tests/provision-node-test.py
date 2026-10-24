@@ -8,6 +8,8 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
+import stat
 import tarfile
 import tempfile
 import unittest
@@ -61,11 +63,13 @@ class NodeProvisionTests(unittest.TestCase):
         with tarfile.open(path, 'w:xz') as archive:
             for name, kind, value in entries:
                 member = tarfile.TarInfo(name)
-                if kind == 'file':
+                if kind in ('file', 'executable'):
                     payload = value.encode(); member.size = len(payload)
+                    member.mode = 0o755 if kind == 'executable' else 0o644
                     archive.addfile(member, io.BytesIO(payload))
                 else:
                     member.type = kind; member.linkname = value
+                    if kind == tarfile.DIRTYPE: member.mode = 0o755
                     archive.addfile(member)
 
     def test_vendor_archive_rejects_unsafe_entries_before_any_extraction(self):
@@ -172,6 +176,72 @@ class NodeProvisionTests(unittest.TestCase):
             for path in (root, keep, root / 'unrelated'):
                 with self.assertRaises(p.Failure): p.clean_stage(path, root, '.npm-stage.')
             self.assertEqual('preserve', (keep / 'keep').read_text())
+
+    @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0 and shutil.which('runuser'), 'Linux root/runuser permission regression')
+    def test_private_umask_vendor_directories_are_app_executable_after_fresh_install_and_resume(self):
+        import pwd
+        try: pwd.getpwnam(p.APP_USER)
+        except KeyError: self.skipTest('Installer application user is not created yet')
+        with tempfile.TemporaryDirectory(prefix='gitreposted-node-modes.', dir='/var/tmp') as temporary:
+            root = Path(temporary); root.chmod(0o755)
+            self.assertEqual(root.resolve(), root); self.assertEqual(root.parent, Path('/var/tmp'))
+            prefix, _ = p.node_archive()
+            archive = root / 'vendor.tar.xz'
+            directories = [prefix, prefix + '/bin', prefix + '/lib', prefix + '/lib/node_modules',
+                           prefix + '/lib/node_modules/npm', prefix + '/lib/node_modules/npm/bin']
+            executable = '#!/bin/sh\nprintf "v' + p.NODE_VERSION + '\\n"\n'
+            self.archive(archive, [(name, tarfile.DIRTYPE, '') for name in directories] + [
+                (prefix + '/bin/node', 'executable', executable),
+                (prefix + '/lib/node_modules/npm/bin/npm-cli.js', 'file', '// fixture npm'),
+                (prefix + '/bin/npm', tarfile.SYMTYPE, '../lib/node_modules/npm/bin/npm-cli.js')])
+            baseline = root / 'baseline'; baseline.mkdir(mode=0o755)
+            old = os.umask(0o077)
+            try: p.extract_node(archive, baseline, prefix)
+            finally: os.umask(old)
+            self.assertEqual(0o700, stat.S_IMODE((baseline / prefix / 'bin').stat().st_mode))
+            self.assertEqual(0o755, stat.S_IMODE((baseline / prefix / 'bin/node').stat().st_mode))
+            with self.assertRaises(p.Failure):
+                p.run(['runuser', '-u', p.APP_USER, '--', baseline / prefix / 'bin/node'], timeout=5)
+            node_root = root / 'node'
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            original_run = p.run
+            def system(argv, **kwargs):
+                if argv[0] == 'curl':
+                    shutil.copyfile(archive, argv[argv.index('--output') + 1]); return b''
+                return original_run(argv, **kwargs)
+            with mock.patch.object(p, 'NODE_ROOT', node_root), mock.patch.object(p, 'node_archive', return_value=(prefix, digest)), \
+                 mock.patch.object(p, 'run', side_effect=system):
+                old = os.umask(0o077)
+                try: p.prepare_node()
+                finally: os.umask(old)
+                vendor = node_root / prefix
+                self.assertEqual(('v' + p.NODE_VERSION + '\n').encode(), original_run(['runuser', '-u', p.APP_USER, '--', vendor / 'bin/node'], timeout=5))
+                marker_before = (vendor / '.gitreposted-node.json').read_bytes()
+                for relative in directories:
+                    (node_root / relative).chmod(0o700)
+                p.prepare_node()  # Existing checkpoint repair, without a download.
+                self.assertEqual(marker_before, (vendor / '.gitreposted-node.json').read_bytes())
+                for relative in directories:
+                    self.assertEqual(0o755, stat.S_IMODE((node_root / relative).stat().st_mode))
+                self.assertEqual('../lib/node_modules/npm/bin/npm-cli.js', os.readlink(vendor / 'bin/npm'))
+                self.assertEqual(0o755, stat.S_IMODE((vendor / 'bin/node').stat().st_mode))
+                self.assertEqual(('v' + p.NODE_VERSION + '\n').encode(), original_run(['runuser', '-u', p.APP_USER, '--', vendor / 'bin/node'], timeout=5))
+
+    @unittest.skipUnless(os.name == 'posix' and os.geteuid() == 0, 'Linux root/no-follow vendor regression')
+    def test_vendor_normalization_never_chmods_external_symlink_or_hardlink_targets(self):
+        for kind in ('escape', 'absolute', 'hardlink', 'cycle'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix='gitreposted-node-links.', dir='/var/tmp') as temporary:
+                root = Path(temporary); self.assertEqual(root.resolve(), root); self.assertEqual(root.parent, Path('/var/tmp'))
+                vendor = root / 'vendor'; vendor.mkdir(mode=0o700)
+                outside = root / 'private'; outside.write_text('preserve fixture'); outside.chmod(0o600)
+                link = vendor / 'link'
+                if kind == 'escape': link.symlink_to('../private')
+                elif kind == 'absolute': link.symlink_to(outside)
+                elif kind == 'hardlink': os.link(outside, link)
+                else: link.symlink_to('link')
+                with self.assertRaises(p.Failure): p.normalize_node_tree(vendor)
+                self.assertEqual(0o600, stat.S_IMODE(outside.stat().st_mode))
+                self.assertEqual('preserve fixture', outside.read_text())
 
 
 if __name__ == '__main__':
