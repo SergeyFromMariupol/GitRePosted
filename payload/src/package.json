@@ -11,7 +11,7 @@
   },
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check src/account-routing.js && node --check src/bot-ui.js && node --check src/config.js && node --check src/link-format.js && node --check src/multipart-stream.js && node --check src/relay-idempotency.js && node --check src/relay-media.js && node --check src/relay-retry.js && node --check src/relay-temp-file.js && node --check src/request-ip.js && node --check src/runtime-secrets.js && node --check src/security-state.js",
+    "check": "node --check server.js && node --check src/account-routing.js && node --check src/account-transfer.js && node --check src/bot-ui.js && node --check src/config.js && node --check src/link-format.js && node --check src/multipart-stream.js && node --check src/relay-idempotency.js && node --check src/relay-media.js && node --check src/relay-retry.js && node --check src/relay-temp-file.js && node --check src/request-ip.js && node --check src/runtime-secrets.js && node --check src/security-state.js",
     "test": "node --test ../../tests/runtime/*.test.mjs"
   },
   "license": "MIT",

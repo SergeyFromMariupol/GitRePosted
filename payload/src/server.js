@@ -68,16 +68,24 @@ import {
   withRelayLeaseHeartbeat
 } from "./src/relay-retry.js";
 import {
+  assertLinkedAccountIdentity,
   assertPublicAccountAccess,
   consumeAccountLinkCodeTransaction,
   deleteRouteAndReleaseUnusedChannels as deleteRouteAndReleaseUnusedChannelsWithQuery,
   grantAccountChannelOwnership,
+  mutateOwnedRouteEnabled,
   ownedRouteAccount,
   retireLegacyRouteSource,
   syncRepostRouteTargets,
   unlinkLinkedAccountCounterpart,
   upsertRepostRoute
 } from "./src/account-routing.js";
+import {
+  allowAccountTransferReceipt,
+  confirmAccountTransfer,
+  prepareAccountTransfer,
+  resolveTransferRecipient
+} from "./src/account-transfer.js";
 import { requestIp } from "./src/request-ip.js";
 import {
   runtimeSecretConfigured,
@@ -1629,7 +1637,105 @@ async function consumeAccountLinkCode(platform, userId, code, { receipt = null }
 }
 
 async function grantAccountChannel(platform, userId, chatId) {
-  return grantAccountChannelOwnership(db, linkedAccount, platform, userId, chatId);
+  const account = await linkedAccount(platform, userId, true);
+  return withDbTransaction(async (query) => {
+    const locked = await lockLinkedAccountForRouting(query, account.id, platform, userId);
+    if (locked.is_blocked || (platform === "max" ? locked.max_blocked : locked.telegram_blocked)) {
+      throw new Error(locked.block_reason || "Доступ заблокирован владельцем сервиса.");
+    }
+    return grantAccountChannelOwnership(query, async () => account, platform, userId, chatId);
+  });
+}
+
+function accountTransferRows(platform, result) {
+  const prefix = platform === "telegram" ? "tg" : "max";
+  const button = (text, action) => platform === "telegram"
+    ? { text, callback_data: `${prefix}:${action}` }
+    : maxCallbackButton(text, `${prefix}:${action}`);
+  const rows = [];
+  if (result.stage === "choice") {
+    rows.push([button("Передать данные", "transfer:send"), button("Получить данные", "transfer:receive")]);
+  }
+  if (result.stage === "confirm") rows.push([button("Подтвердить перенос", `transfer:confirm:${result.token}`)]);
+  rows.push([button(result.stage === "complete" ? "← В меню" : "Отмена", "menu")]);
+  return rows;
+}
+
+function accountTransferChoice() {
+  return {
+    action: "account_transfer",
+    stage: "choice",
+    message: "♻️ ПЕРЕНОС ДАННЫХ\n\nПередайте все свои каналы, пересылки и права в GitRePosted новому аккаунту на этой же платформе. Связанный аккаунт другой платформы тоже перейдёт в новую связку. Старый аккаунт потеряет доступ, данные получателя сохранятся.\n\nСначала на новом аккаунте выберите «Получить данные», затем на старом — «Передать данные». Завершите перенос до удаления старого аккаунта."
+  };
+}
+
+async function performAccountTransferAction(platform, userId, stage, { input = "", token = "" } = {}, receipt = null) {
+  const table = platform === "telegram" ? "telegram_users" : "max_users";
+  const identity = platform === "telegram" ? "telegram_user_id" : "max_user_id";
+  try {
+    return await withDbTransaction(async (query) => {
+      let result;
+      if (stage === "send") {
+        await query(`UPDATE ${table} SET state = 'account_transfer_input', state_payload = NULL WHERE ${identity} = ?`, [String(userId)]);
+        result = { action: "account_transfer", stage: "input", message: "Отправьте ID или @username нового аккаунта и его код через пробел.\n\nКод получите на новом аккаунте: «Перенос данных» → «Получить данные». После ввода вы увидите получателя и состав переноса." };
+      } else if (stage === "receive") {
+        const consent = await allowAccountTransferReceipt(query, platform, userId, { token: crypto.randomBytes(12).toString("hex") });
+        result = { action: "account_transfer", stage: "receive", message: `На старом аккаунте откройте «Перенос данных» → «Передать данные» и отправьте эту строку:\n\n${userId} ${consent.token}\n\nКод действует 10 минут и разрешает принять данные и связанную учётную запись. После переноса имеющиеся у вас данные сохранятся.` };
+      } else if (stage === "prepare") {
+        const [recipientInput, receiverToken, ...extra] = String(input).trim().split(/\s+/);
+        if (extra.length) {
+          const error = new Error("Отправьте ID или @username и код получателя через пробел.");
+          error.code = "ACCOUNT_TRANSFER_INVALID";
+          throw error;
+        }
+        const recipient = await resolveTransferRecipient(query, platform, recipientInput);
+        const proposal = await prepareAccountTransfer(query, platform, userId, recipient.user_id, {
+          token: crypto.randomBytes(12).toString("hex"),
+          receiverToken: String(receiverToken || "").toLowerCase()
+        });
+        const counterpart = proposal.counterpartUserId
+          ? `\nСвязанный аккаунт ${proposal.counterpartPlatform === "max" ? "МАКС" : "Telegram"}: ${proposal.counterpartUserId}.`
+          : "";
+        result = {
+          action: "account_transfer", stage: "confirm", token: proposal.token,
+          message: `Получатель: ${proposal.targetLabel} (ID ${proposal.targetUserId}).\n\nКаналов: ${proposal.channels}.\nПересылок: ${proposal.routes}.\nПрежних связок: ${proposal.bridges}.${counterpart}\n\nВсе эти данные и выданные вам права перейдут получателю. У старого аккаунта доступ к ним будет снят. Действующие настройки и очередь отправок сохранятся.\n\nПодтвердите перенос в течение 10 минут, пока действует код получателя.`
+        };
+      } else if (stage === "confirm") {
+        const outcome = await confirmAccountTransfer(query, platform, userId, token);
+        result = {
+          action: "account_transfer", stage: "complete",
+          message: `Перенос завершён. Получатель: ${outcome.targetLabel} (ID ${outcome.targetUserId}).\n\nПереданы каналы: ${outcome.channels}, пересылки: ${outcome.routes}, прежние связки: ${outcome.bridges}, а также ваши права в GitRePosted. У старого аккаунта эти данные и права сняты.\n\nНа новом аккаунте откройте /start → «Настроенные пересылки».`
+        };
+      } else {
+        throw new TypeError("Unknown account transfer action.");
+      }
+      await persistBotEventResult(query, receipt, result);
+      return result;
+    });
+  } catch (error) {
+    if (error.code !== "ACCOUNT_TRANSFER_INVALID") throw error;
+    const result = { action: "account_transfer", stage: "error", message: error.message };
+    return withDbTransaction(async (query) => {
+      if (stage === "prepare") {
+        // A failed new selection also invalidates the previous recipient's confirmation.
+        await query(`UPDATE ${table} SET state = 'account_transfer_input', state_payload = NULL WHERE ${identity} = ?`, [String(userId)]);
+      }
+      await persistBotEventResult(query, receipt, result);
+      return result;
+    });
+  }
+}
+
+async function accountTransferTextAction(platform, userId, text, receipt) {
+  if (text === "/transfer" || /^перенос данных$/i.test(text)) return accountTransferChoice();
+  if (/^\/(?:start|menu|link)$|^меню$/i.test(text)) return null;
+  const user = platform === "telegram" ? await getTelegramUser(userId) : await getMaxUser(userId);
+  if (!["account_transfer_input", "account_transfer_confirm"].includes(user?.state)) return null;
+  return performAccountTransferAction(platform, userId, "prepare", { input: text }, receipt);
+}
+
+function redactedTransferText(text) {
+  return String(text || "").replace(/\b[a-f0-9]{24}\b/gi, "[transfer-code]");
 }
 
 async function accountAccess(platform, userId) {
@@ -1749,13 +1855,14 @@ async function routeIdForSource(accountId, sourcePlatform, sourceChatId, query =
   return rows[0]?.id ? String(rows[0].id) : null;
 }
 
-async function lockLinkedAccountForRouting(query, accountId) {
+async function lockLinkedAccountForRouting(query, accountId, platform = undefined, userId = undefined) {
   const rows = await query(
-    `SELECT id, is_blocked, telegram_blocked, max_blocked, block_reason
+    `SELECT id, telegram_user_id, max_user_id, is_blocked, telegram_blocked, max_blocked, block_reason
      FROM linked_accounts WHERE id = ? LIMIT 1 FOR UPDATE`,
     [accountId]
   );
   if (!rows[0]) throw new Error("Аккаунт владельца пересылки не найден.");
+  if (platform !== undefined) assertLinkedAccountIdentity(rows[0], platform, userId);
   return rows[0];
 }
 
@@ -1772,7 +1879,7 @@ async function saveUniversalRouteForUser(
   let savedRouteId = "";
   let savedTargetCount = 0;
   await withDbTransaction(async (query) => {
-    const lockedAccount = await lockLinkedAccountForRouting(query, access.account.id);
+    const lockedAccount = await lockLinkedAccountForRouting(query, access.account.id, platform, userId);
     const platformBlocked = platform === "max"
       ? lockedAccount.max_blocked
       : lockedAccount.telegram_blocked;
@@ -3608,35 +3715,64 @@ async function saveBridge(sourcePlatform, sourceUserId, telegramChatId, maxChatI
   } else {
     account = await linkedAccount(sourcePlatform, sourceUserId, true);
   }
-  await assertAccountChannel(account.id, "telegram", telegramChatId);
-  await assertAccountChannel(account.id, "max", maxChatId);
-  const tgRows = await db("SELECT title FROM telegram_channels WHERE chat_id = ? LIMIT 1", [String(telegramChatId)]);
-  const maxRows = await db("SELECT title FROM max_channels WHERE chat_id = ? LIMIT 1", [String(maxChatId)]);
   const telegramId = String(telegramChatId);
   const maxId = String(maxChatId);
-  const title = `${tgRows[0]?.title || telegramId} ↔ ${maxRows[0]?.title || maxId}`;
-  const existing = await db("SELECT id FROM bridges WHERE account_id = ? AND telegram_chat_id = ? AND max_chat_id = ? LIMIT 1", [account.id, telegramId, maxId]);
-  if (existing.length > 0) {
-    await db(
-      `UPDATE bridges
-       SET title = ?, enabled = 1, direction = ?, account_id = COALESCE(account_id, ?), updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-      [title, direction, account.id, String(existing[0].id)]
+  await withDbTransaction(async (query) => {
+    const lockedAccount = String(sourceUserId) === "admin-panel"
+      ? await lockLinkedAccountForRouting(query, account.id)
+      : await lockLinkedAccountForRouting(query, account.id, sourcePlatform, sourceUserId);
+    if (String(sourceUserId) !== "admin-panel"
+      && (lockedAccount.is_blocked
+        || lockedAccount[sourcePlatform === "max" ? "max_blocked" : "telegram_blocked"])) {
+      throw new Error(lockedAccount.block_reason || "Доступ заблокирован владельцем сервиса.");
+    }
+    for (const [platform, chatId] of [["telegram", telegramId], ["max", maxId]]) {
+      const ownership = await query(
+        `SELECT 1 FROM account_channels
+         WHERE account_id = ? AND platform = ? AND chat_id = ? AND is_blocked = 0
+         LIMIT 1 FOR UPDATE`,
+        [account.id, platform, chatId]
+      );
+      if (!ownership[0]) throw new Error("Канал не принадлежит этому пользователю или заблокирован.");
+    }
+    const tgRows = await query("SELECT title FROM telegram_channels WHERE chat_id = ? LIMIT 1", [telegramId]);
+    const maxRows = await query("SELECT title FROM max_channels WHERE chat_id = ? LIMIT 1", [maxId]);
+    const title = `${tgRows[0]?.title || telegramId} ↔ ${maxRows[0]?.title || maxId}`;
+    const existing = await query(
+      "SELECT id FROM bridges WHERE account_id = ? AND telegram_chat_id = ? AND max_chat_id = ? LIMIT 1 FOR UPDATE",
+      [account.id, telegramId, maxId]
     );
-    await syncLegacyPairToRoutes(account.id, telegramId, maxId, direction, true);
-    return;
-  }
-  const occupied = await db("SELECT account_id FROM bridges WHERE telegram_chat_id = ? AND max_chat_id = ? LIMIT 1", [telegramId, maxId]);
-  if (occupied[0] && String(occupied[0].account_id) !== String(account.id)) {
-    throw new Error("Эта пара каналов уже принадлежит другому пользователю GitRePosted.");
-  }
-  const bridgeId = `bridge_${hashKey([account.id, telegramId, maxId]).slice(0, 24)}`;
-  await db(
-    `INSERT INTO bridges (id, title, enabled, direction, telegram_chat_id, max_chat_id, account_id)
-     VALUES (?, ?, 1, ?, ?, ?, ?)`,
-    [bridgeId, title, direction, telegramId, maxId, account.id]
-  );
-  await syncLegacyPairToRoutes(account.id, telegramId, maxId, direction, true);
+    if (existing.length > 0) {
+      await query(
+        `UPDATE bridges
+         SET title = ?, enabled = 1, direction = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND account_id = ?`,
+        [title, direction, String(existing[0].id), account.id]
+      );
+    } else {
+      const occupied = await query(
+        "SELECT account_id FROM bridges WHERE telegram_chat_id = ? AND max_chat_id = ? LIMIT 1 FOR UPDATE",
+        [telegramId, maxId]
+      );
+      if (occupied[0] && String(occupied[0].account_id) !== String(account.id)) {
+        throw new Error("Эта пара каналов уже принадлежит другому пользователю GitRePosted.");
+      }
+      const bridgeId = `bridge_${hashKey([account.id, telegramId, maxId]).slice(0, 24)}`;
+      await query(
+        `INSERT INTO bridges (id, title, enabled, direction, telegram_chat_id, max_chat_id, account_id)
+         VALUES (?, ?, 1, ?, ?, ?, ?)`,
+        [bridgeId, title, direction, telegramId, maxId, account.id]
+      );
+    }
+    await reconcileLegacyBridgeRoute(query, account.id, "telegram", telegramId, {
+      removeWhenMissing: true,
+      removedLegacyTargetChatIds: [maxId]
+    });
+    await reconcileLegacyBridgeRoute(query, account.id, "max", maxId, {
+      removeWhenMissing: true,
+      removedLegacyTargetChatIds: [telegramId]
+    });
+  });
 }
 
 async function updateBridgeChannels(id, telegramChatId, maxChatId) {
@@ -5813,6 +5949,15 @@ async function queueTelegramUpdate(update) {
 async function replayTelegramBotAction(update, receipt) {
   const result = receipt?.result;
   const retryGuaranteedResponseFailure = receipt?.lastError === "TELEGRAM_RATE_LIMIT";
+  if (result?.action === "account_transfer") {
+    const message = update?.callback_query?.message;
+    if (message) {
+      await editTelegramMenu(message.chat.id, message.message_id, result.message, accountTransferRows("telegram", result), null);
+    } else if (retryGuaranteedResponseFailure && update?.message?.chat?.id) {
+      await tgApi("sendMessage", { chat_id: update.message.chat.id, text: result.message, reply_markup: tgInline(accountTransferRows("telegram", result)) });
+    }
+    return true;
+  }
   if (result?.action === "telegram_reply_state") {
     if (retryGuaranteedResponseFailure && update?.message?.chat?.id && update?.message?.from?.id) {
       const chatId = update.message.chat.id;
@@ -6661,7 +6806,8 @@ async function sendTelegramMenu(chatId, text = MAIN_MENU_TEXT) {
     text,
     reply_markup: tgReplyKeyboard([
       ["Создать пересылку", "Настроенные пересылки"],
-      ["Добавить канал", "Связь аккаунтов"]
+      ["Добавить канал", "Связь аккаунтов"],
+      ["Перенос данных"]
     ])
   });
 }
@@ -6671,6 +6817,7 @@ async function sendTelegramLinkStatus(chatId, userId) {
   const action = account.max_user_id ? "Заменить аккаунт МАКС" : "Связать аккаунт МАКС";
   const buttons = [[{ text: action, callback_data: "tg:linkcode" }]];
   if (account.max_user_id) buttons.push([{ text: "Отвязать аккаунт МАКС", callback_data: "tg:unlinkmax" }]);
+  buttons.push([{ text: "Перенос данных", callback_data: "tg:transfer" }]);
   return tgApi("sendMessage", {
     chat_id: chatId,
     text: accountLinkStatusText(account, true),
@@ -6766,7 +6913,8 @@ function maxCallbackRowsFromMessage(message) {
 function maxMainButtons() {
   return [
     [maxCallbackButton("Создать пересылку", "max:create"), maxCallbackButton("Настроенные пересылки", "max:bridges")],
-    [maxCallbackButton("Добавить канал", "max:addchannel"), maxCallbackButton("Связь аккаунтов", "max:link")]
+    [maxCallbackButton("Добавить канал", "max:addchannel"), maxCallbackButton("Связь аккаунтов", "max:link")],
+    [maxCallbackButton("Перенос данных", "max:transfer")]
   ];
 }
 
@@ -7225,7 +7373,7 @@ async function handleTelegramMessage(message, receipt = null) {
     chatId: chat.id ? String(chat.id) : null,
     chatType: chat.type || null,
     fromId: message.from?.id ? String(message.from.id) : null,
-    text: message.text || ""
+    text: redactedTransferText(message.text)
   });
   await rememberInboundEvent("telegram", "message", chat.id || null, message.from?.id || null, message);
   if (chat.type === "private") {
@@ -7239,6 +7387,11 @@ async function handleTelegramMessage(message, receipt = null) {
     }
     if (env.PUBLIC_TELEGRAM_ENABLED !== "1") {
       await tgApi("sendMessage", { chat_id: chat.id, text: "Публичный доступ сейчас выключен владельцем сервиса." });
+      return;
+    }
+    const transfer = await accountTransferTextAction("telegram", from.id, text, receipt);
+    if (transfer) {
+      await tgApi("sendMessage", { chat_id: chat.id, text: transfer.message, reply_markup: tgInline(accountTransferRows("telegram", transfer)) });
       return;
     }
     if (/^\d{6}$/.test(text)) {
@@ -7473,7 +7626,7 @@ async function handleTelegramCallback(callback, receipt = null) {
   const data = String(callback.data || "");
   debugLog("telegram_callback", {
     fromId: String(from.id || ""),
-    data,
+    data: redactedTransferText(data),
     chatId: chatId ? String(chatId) : null
   });
   await rememberInboundEvent("telegram", "callback_query", chatId || null, from.id || null, callback);
@@ -7484,6 +7637,17 @@ async function handleTelegramCallback(callback, receipt = null) {
     return;
   }
   if (!chatId || !messageId) return;
+
+  if (data === "tg:transfer" || data.startsWith("tg:transfer:")) {
+    if (callback.message?.chat?.type !== "private" || String(chatId) !== String(from.id)) return;
+    let result = accountTransferChoice();
+    if (data === "tg:transfer:send" || data === "tg:transfer:receive") {
+      result = await performAccountTransferAction("telegram", from.id, data.split(":")[2], {}, receipt);
+    } else if (data.startsWith("tg:transfer:confirm:")) {
+      result = await performAccountTransferAction("telegram", from.id, "confirm", { token: data.slice("tg:transfer:confirm:".length) }, receipt);
+    }
+    return editTelegramMenu(chatId, messageId, result.message, accountTransferRows("telegram", result), null);
+  }
 
   if (data === "tg:menu") {
     await setTelegramState(from.id, null, null);
@@ -7708,8 +7872,7 @@ async function handleTelegramCallback(callback, receipt = null) {
     if (!new Set(["0", "1"]).has(enabledValue)) {
       return renderTelegramBridges(chatId, messageId);
     }
-    await assertOwnedRoute("telegram", from.id, routeId);
-    await db("UPDATE repost_routes SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [Number(enabledValue), routeId]);
+    await withDbTransaction((query) => mutateOwnedRouteEnabled(query, "telegram", from.id, routeId, enabledValue === "1"));
     return renderTelegramBridges(chatId, messageId);
   }
   if (data.startsWith("tg:delete:")) {
@@ -8110,7 +8273,7 @@ async function handleMaxEventOnce(body, receipt = null) {
     debugLog("max_message_created", {
       chatId,
       chatType,
-      text
+      text: redactedTransferText(text)
     });
 
     if (isMaxDirectChat(chatType) && userId) {
@@ -8119,6 +8282,11 @@ async function handleMaxEventOnce(body, receipt = null) {
       if (access.blocked || env.PUBLIC_MAX_ENABLED !== "1") {
         await sendMaxChat(chatId, access.blocked ? access.reason : "Публичный доступ сейчас выключен владельцем сервиса.");
         return { ok: true, ignored: true };
+      }
+      const transfer = await accountTransferTextAction("max", userId, String(text || "").trim(), receipt);
+      if (transfer) {
+        await sendMaxChat(chatId, transfer.message, maxKeyboard(accountTransferRows("max", transfer)));
+        return { ok: true };
       }
       const forwardedChannel = forwardedMaxChannel(fullMessage);
       if (forwardedChannel) {
@@ -8166,11 +8334,23 @@ async function handleMaxEventOnce(body, receipt = null) {
       return { ok: true, ignored: true };
     }
     const userRow = await getMaxUser(userId);
+    if (payload === "max:transfer" || payload.startsWith("max:transfer:")) {
+      if (!userRow?.chat_id || String(userRow.chat_id) !== String(chatId)) return { ok: true, ignored: true };
+      let result = accountTransferChoice();
+      if (payload === "max:transfer:send" || payload === "max:transfer:receive") {
+        result = await performAccountTransferAction("max", userId, payload.split(":")[2], {}, receipt);
+      } else if (payload.startsWith("max:transfer:confirm:")) {
+        result = await performAccountTransferAction("max", userId, "confirm", { token: payload.slice("max:transfer:confirm:".length) }, receipt);
+      }
+      await answerMaxCallback(callbackId, result.message, accountTransferRows("max", result));
+      return { ok: true };
+    }
     if (payload === "max:link") {
       const account = await linkedAccountStatus("max", userId);
       const action = account.telegram_user_id ? "Заменить аккаунт Telegram" : "Связать аккаунт Telegram";
       const buttons = [[maxCallbackButton(action, "max:linkcode")]];
       if (account.telegram_user_id) buttons.push([maxCallbackButton("Отвязать аккаунт Telegram", "max:unlinktg")]);
+      buttons.push([maxCallbackButton("Перенос данных", "max:transfer")]);
       buttons.push([maxCallbackButton("← Назад", "max:menu")]);
       await answerMaxCallback(callbackId, accountLinkStatusText(account), buttons);
       return { ok: true };
@@ -8433,8 +8613,7 @@ async function handleMaxEventOnce(body, receipt = null) {
         await renderMaxBridges(chatId, callbackId, 0, userId);
         return { ok: true, stale: true };
       }
-      await assertOwnedRoute("max", userId, routeId);
-      await db("UPDATE repost_routes SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [Number(enabledValue), routeId]);
+      await withDbTransaction((query) => mutateOwnedRouteEnabled(query, "max", userId, routeId, enabledValue === "1"));
       await renderMaxBridges(chatId, callbackId, 0, userId);
       return { ok: true };
     }
@@ -8471,7 +8650,7 @@ async function handleMaxEvent(body) {
   try {
     const result = await withBotEventReceiptHeartbeat(receipt, async (assertReceipt) => {
       await assertReceipt();
-      const handled = ["save_route", "consume_link_code"].includes(receipt.result?.action)
+      const handled = ["save_route", "consume_link_code", "account_transfer"].includes(receipt.result?.action)
         ? await replayMaxBotAction(body, receipt)
         : await handleMaxEventOnce(body, receipt);
       await assertReceipt();
@@ -8508,6 +8687,21 @@ function maxCallbackIsAlreadyClosed(error) {
 async function replayMaxBotAction(body, receipt) {
   const result = receipt?.result;
   const retryGuaranteedResponseFailure = receipt?.lastError === "MAX_RATE_LIMIT";
+  if (result?.action === "account_transfer") {
+    const callback = extractMaxCallback(body);
+    const callbackId = callback.callback_id || callback.id;
+    if (callbackId) {
+      try {
+        await answerMaxCallback(callbackId, result.message, accountTransferRows("max", result));
+      } catch (error) {
+        if (!maxCallbackIsAlreadyClosed(error)) throw error;
+      }
+    } else if (retryGuaranteedResponseFailure) {
+      const chatId = maxEventChatId(body, extractMaxChat(body) || {}, extractMaxMessage(body), callback);
+      if (chatId) await sendMaxChat(chatId, result.message, maxKeyboard(accountTransferRows("max", result)));
+    }
+    return { ok: true, replayed: true };
+  }
   if (result?.action === "consume_link_code") {
     if (retryGuaranteedResponseFailure) {
       const callback = extractMaxCallback(body);

@@ -83,6 +83,41 @@ function accountIsBlocked(account, platform) {
   return Boolean(account?.is_blocked || account?.[blockedColumn]);
 }
 
+export function assertLinkedAccountIdentity(account, platform, userId) {
+  const { identityColumn } = identityColumns(platform);
+  if (!account?.[identityColumn]
+    || String(account[identityColumn]) !== String(userId)) {
+    throw new Error("Привязка аккаунта изменилась. Откройте меню заново.");
+  }
+  return account;
+}
+
+// Call inside the same transaction as the update. Locking the current account
+// before the route serializes this action with ownership transfer.
+export async function mutateOwnedRouteEnabled(query, platform, userId, routeId, enabled) {
+  const { identityColumn } = identityColumns(platform);
+  const accounts = await query(
+    `SELECT id, telegram_user_id, max_user_id, is_blocked,
+            telegram_blocked, max_blocked, block_reason
+     FROM linked_accounts WHERE ${identityColumn} = ? LIMIT 1 FOR UPDATE`,
+    [String(userId)]
+  );
+  const account = accounts[0];
+  assertLinkedAccountIdentity(account, platform, userId);
+  if (accountIsBlocked(account, platform)) {
+    throw new Error(account.block_reason || "Доступ заблокирован владельцем сервиса.");
+  }
+  const routes = await query(
+    "SELECT id FROM repost_routes WHERE id = ? AND account_id = ? LIMIT 1 FOR UPDATE",
+    [String(routeId), account.id]
+  );
+  if (!routes[0]) throw new Error("Пересылка не найдена.");
+  await query(
+    "UPDATE repost_routes SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND account_id = ?",
+    [enabled ? 1 : 0, String(routeId), account.id]
+  );
+}
+
 async function detachIdentityToStandaloneAccount(query, account, platform) {
   const {
     identityColumn,

@@ -45,7 +45,7 @@ OPTIONAL_INSTALLER_FILES = (
 )
 RUNTIME_FILES = (
     "server.js", "package.json", "package-lock.json", ".env.example", "telegram-bot-api.env.example",
-    "src/account-routing.js", "src/bot-ui.js", "src/config.js", "src/link-format.js",
+    "src/account-routing.js", "src/account-transfer.js", "src/bot-ui.js", "src/config.js", "src/link-format.js",
     "src/multipart-stream.js", "src/portable-runtime.js", "src/public-base.js", "src/relay-idempotency.js",
     "src/relay-media.js", "src/relay-retry.js", "src/relay-temp-file.js", "src/request-ip.js",
     "src/runtime-secrets.js", "src/security-state.js", "public/index.html", "public/app.js",
@@ -56,7 +56,8 @@ RUNTIME_FILES = (
 RUNTIME_TESTS = tuple("tests/runtime/" + name + ".test.mjs" for name in (
     "bot-ui", "link-format", "relay-idempotency", "relay-media", "relay-retry", "request-ip",
     "runtime-secrets", "security-state", "streaming-transfer", "portable-runtime", "portable-server",
-    "portable-webhook-setup", "mount-prefix",
+    "portable-webhook-setup", "mount-prefix", "account-transfer", "account-transfer-ui",
+    "account-transfer-relay", "account-route-transfer-races",
 ))
 PUBLIC_FILES = frozenset(INSTALLER_FILES + OPTIONAL_INSTALLER_FILES + RUNTIME_TESTS
                          + tuple("payload/src/" + name for name in RUNTIME_FILES))

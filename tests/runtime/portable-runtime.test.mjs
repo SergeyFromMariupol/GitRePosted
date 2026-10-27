@@ -179,7 +179,10 @@ test("landing uses configured safe bot URLs and leaves disabled or malicious lin
     [{ telegram: { public: false, url: "https://t.me/portable_bot" }, max: { public: true, url: "javascript:alert(1)" } }, [undefined, undefined]],
     [{ telegram: { public: true, url: "https://t.me.evil.example/portable_bot" }, max: { public: true, url: "https://max.ru/portable_bot#bad" } }, [undefined, undefined]]
   ]) {
-    const context = vm.createContext({ URL, fetch: async () => ({ json: async () => data }), document: { querySelectorAll: (selector) => selector === "[data-platform-link]" ? links : [] } });
+    const context = vm.createContext({ URL, fetch: async () => ({ json: async () => data }), document: {
+      querySelector: (selector) => selector === 'meta[name="gitreposted-base-path"]' ? { content: "" } : null,
+      querySelectorAll: (selector) => selector === "[data-platform-link]" ? links : []
+    } });
     await vm.runInContext(source, context);
     assert.deepEqual(links.map((link) => link.href), expected);
   }
